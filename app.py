@@ -7,8 +7,9 @@ Run with:
     streamlit run app.py
 
 Flow:
-    Page 1 — Login: faculty enters username + password (verified against portal)
-    Page 2 — Dashboard: pick batch year + semester → Generate Report → Download
+    Page 1 — Login: faculty enters username, password, batch year, semester
+             → logs into that specific batch's portal sub-site
+    Page 2 — Dashboard: shows selected batch+semester, generate report → download
 """
 
 import logging
@@ -39,13 +40,18 @@ st.set_page_config(
     layout="centered",
 )
 
+# ── Batch years — fixed to deployed batches on the portal ─────────────────
+BATCH_YEARS = [2024, 2023, 2022, 2021, 2020]
+
 # ── Session state defaults ─────────────────────────────────────────────────
 for _key, _default in [
-    ("logged_in",    False),
-    ("username",     ""),
-    ("password",     ""),
-    ("report_bytes", None),
-    ("report_name",  None),
+    ("logged_in",        False),
+    ("username",         ""),
+    ("password",         ""),
+    ("batch_year",       None),
+    ("semester",         None),
+    ("report_bytes",     None),
+    ("report_name",      None),
 ]:
     if _key not in st.session_state:
         st.session_state[_key] = _default
@@ -53,48 +59,9 @@ for _key, _default in [
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
-def _get_batch_years():
-    """Return list of admission years newest-first, up to last year."""
-    current_year = datetime.now().year
-    try:
-        start_year = int(os.getenv("PORTAL_BATCH_START_YEAR", "2018"))
-    except ValueError:
-        start_year = 2018
-    # Stop at current_year - 1: current calendar year batch not deployed yet
-    end_year = current_year - 1
-    return list(range(end_year, start_year - 1, -1))
-
-
 def _read_file_bytes(path):
     with open(path, "rb") as fh:
         return fh.read()
-
-
-def _verify_credentials(username, password, batch_years):
-    """
-    Verify credentials by trying to log in to semester 1 of known batch years.
-    Tries oldest years first since they are most reliably deployed on the portal.
-
-    Returns (True, None) on success, (False, error_message) on failure.
-    """
-    auth = PortalAuth(username=username, password=password)
-
-    # Try oldest → newest; stop as soon as one sub-site responds
-    for year in reversed(batch_years):
-        try:
-            auth.login(admission_year=year, semester=1)
-            return True, None          # credentials accepted
-        except AuthError as exc:
-            # Portal responded but rejected credentials — no point trying others
-            return False, str(exc)
-        except Exception:
-            # Sub-site not reachable — try next year
-            continue
-
-    return False, (
-        "Could not reach any batch sub-site on the portal. "
-        "Make sure you are connected to the college network."
-    )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -128,6 +95,23 @@ def show_login_page():
                 type="password",
                 placeholder="Enter your portal password",
             )
+
+            col_year, col_sem = st.columns(2)
+            with col_year:
+                batch_year = st.selectbox(
+                    "Batch Year",
+                    options=BATCH_YEARS,
+                    index=0,
+                    help="Admission year of the batch e.g. 2020",
+                )
+            with col_sem:
+                semester = st.selectbox(
+                    "Semester",
+                    options=list(range(1, 9)),
+                    index=0,
+                    format_func=lambda s: f"Semester {s}",
+                )
+
             submit = st.form_submit_button(
                 "Login", use_container_width=True, type="primary"
             )
@@ -137,16 +121,25 @@ def show_login_page():
                 st.error("Please enter both username and password.")
                 return
 
-            with st.spinner("Verifying credentials with portal…"):
-                ok, err = _verify_credentials(username, password, _get_batch_years())
+            with st.spinner(
+                f"Logging in to {batch_year} batch · Semester {semester}…"
+            ):
+                try:
+                    auth = PortalAuth(username=username, password=password)
+                    auth.login(admission_year=batch_year, semester=semester)
 
-            if ok:
-                st.session_state["logged_in"] = True
-                st.session_state["username"]  = username
-                st.session_state["password"]  = password
-                st.rerun()
-            else:
-                st.error(f"❌ {err}")
+                    # Credentials accepted — store in session
+                    st.session_state["logged_in"]  = True
+                    st.session_state["username"]   = username
+                    st.session_state["password"]   = password
+                    st.session_state["batch_year"] = batch_year
+                    st.session_state["semester"]   = semester
+                    st.rerun()
+
+                except AuthError as exc:
+                    st.error(f"❌ Login failed: {exc}")
+                except Exception as exc:
+                    st.error(f"❌ Could not connect to portal: {exc}")
 
         st.markdown(
             "<p style='text-align:center; color:gray; font-size:12px;"
@@ -163,48 +156,33 @@ def show_login_page():
 # ══════════════════════════════════════════════════════════════════════════
 
 def show_main_page():
+    selected_year     = st.session_state["batch_year"]
+    selected_semester = st.session_state["semester"]
+
     # ── Top bar ────────────────────────────────────────────────────────
     col_title, col_logout = st.columns([5, 1])
     with col_title:
         st.title("🎓 Faculty Marks Portal")
         st.caption(
             f"Logged in as **{st.session_state['username']}** · "
+            f"Batch **{selected_year}** · Semester **{selected_semester}** · "
             "VIMS Section Marks Dashboard"
         )
     with col_logout:
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("Logout", use_container_width=True):
-            st.session_state["logged_in"]    = False
-            st.session_state["username"]     = ""
-            st.session_state["password"]     = ""
-            st.session_state["report_bytes"] = None
-            st.session_state["report_name"]  = None
+            for k in ["logged_in", "username", "password",
+                      "batch_year", "semester",
+                      "report_bytes", "report_name"]:
+                st.session_state[k] = False if k == "logged_in" else None
             st.rerun()
 
     st.divider()
 
-    # ── Selectors ──────────────────────────────────────────────────────
-    st.subheader("Select Batch & Semester")
-
-    col_year, col_sem = st.columns(2)
-    with col_year:
-        selected_year = st.selectbox(
-            "Admission Year",
-            options=_get_batch_years(),
-            index=0,
-            help="The year this batch was admitted e.g. 2020",
-        )
-    with col_sem:
-        selected_semester = st.selectbox(
-            "Semester",
-            options=list(range(1, 9)),
-            index=0,
-            format_func=lambda s: f"Semester {s}",
-        )
-
-    st.caption(
-        f"Will fetch marks for **all sections** assigned to you in "
-        f"Semester **{selected_semester}** of the **{selected_year}** batch."
+    # ── Summary card ───────────────────────────────────────────────────
+    st.info(
+        f"📋 Generating master marks sheet for **{selected_year} batch · "
+        f"Semester {selected_semester}** — all sections assigned to you."
     )
 
     st.divider()
@@ -218,7 +196,7 @@ def show_main_page():
 
         progress_bar = st.progress(0, text="Starting…")
         status_text  = st.empty()
-        no_sections  = False      # flag used outside try block
+        no_sections  = False
 
         try:
             auth    = PortalAuth(
@@ -227,7 +205,7 @@ def show_main_page():
             )
             scraper = SemesterScraper(auth)
 
-            # Step 1 — discover sections for this semester
+            # Step 1 — discover sections
             status_text.info(
                 f"🔍 Fetching sections for {selected_year} · "
                 f"Semester {selected_semester}…"
@@ -238,7 +216,7 @@ def show_main_page():
             )
 
             if not sections:
-                no_sections = True      # handle after try block
+                no_sections = True
             else:
                 total_sections = len(sections)
                 st.info(
@@ -252,7 +230,9 @@ def show_main_page():
                         idx / total,
                         text=f"Section {idx} of {total} done",
                     )
-                    status_text.info(f"⏳ Processing section {idx} of {total}…")
+                    status_text.info(
+                        f"⏳ Processing section {idx} of {total}…"
+                    )
 
                 all_records = scraper.scrape_all_sections(
                     admission_year=selected_year,
@@ -292,8 +272,7 @@ def show_main_page():
             status_text.empty()
             progress_bar.empty()
             st.error(
-                f"❌ Session expired during scraping — please logout and "
-                f"login again. ({exc})"
+                f"❌ Session expired — please logout and login again. ({exc})"
             )
         except Exception as exc:
             status_text.empty()
@@ -301,15 +280,12 @@ def show_main_page():
             st.error(f"❌ Unexpected error: {exc}")
             logger.exception("Error during report generation")
 
-        # Handle no-sections case outside the try block
-        # (avoids st.stop() being caught by the except handler)
         if no_sections:
             status_text.empty()
             progress_bar.empty()
             st.warning(
                 "⚠️ No sections found for this batch and semester. "
-                "Check that the correct year and semester are selected "
-                "and that marks have been uploaded on the portal."
+                "Check that marks have been uploaded on the portal."
             )
 
     # ── Download ───────────────────────────────────────────────────────
