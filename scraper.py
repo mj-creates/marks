@@ -1,42 +1,25 @@
 """
 scraper.py — Semester Marks Downloader
 ========================================
-For a given semester this module:
-  1. Logs in to that semester's sub-site  (separate login per sem)
-  2. GETs examhome.jsp  (sets referrer/session state the portal may need)
-  3. GETs RSMSubAll.jsp to dynamically read the subjectcode1 dropdown
-     (these are the sections available to this faculty)
-  4. POSTs the form once per section with excel=YES to download each
-     section's Excel binary
-  5. Reads each Excel into a list of row-dicts using pandas
-  6. Merges all sections into one flat list
+Follows the exact same navigation path a human takes in the browser:
+
+  1. POST login.jsp          → authenticated session
+  2. GET  examhome.jsp       → portal home after login
+  3. GET  the Exams-norms menu link  (sets server-side nav state)
+  4. GET  RSMSubAll.jsp      → "Section Marks All Subjects" form page
+  5. Read subjectcode1 dropdown  → list of sections for this faculty
+  6. POST RSMSubAll.jsp once per section with excel=YES
+  7. Parse the downloaded Excel binary with pandas
+  8. Tag every row with Semester + Section and return flat list
 
 Confirmed form fields (browser network payload):
     coursecode   = A          (B.Tech — fixed)
     branchcode   = 04         (CSE    — fixed)
     cyear        = 1–4        (derived: sem 1-2→1, 3-4→2, 5-6→3, 7-8→4)
     semester     = 1–8
-    subjectcode1 = <numeric>  (section ID — fetched dynamically per faculty)
+    subjectcode1 = <numeric>  (section ID — read dynamically from dropdown)
     excel        = YES
     next         = submit
-
-Usage:
-    from scraper import SemesterScraper
-    from auth import PortalAuth
-
-    auth    = PortalAuth()
-    scraper = SemesterScraper(auth)
-
-    # Fetch available sections for sem 1 of 2020 batch
-    sections = scraper.get_available_sections(admission_year=2020, semester=1)
-    # e.g. [{"label": "11", "value": "11"}, {"label": "15", "value": "15"}, ...]
-
-    # Scrape ALL sections for semester 1 of 2020 batch
-    records = scraper.scrape_all_sections(
-        admission_year=2020,
-        semester=1,
-        progress_callback=lambda sec_idx, total: print(f"section {sec_idx}/{total}")
-    )
 """
 
 import io
@@ -59,11 +42,10 @@ _BRANCH_CODE = "04"   # CSE
 
 class SemesterScraper:
     """
-    Downloads and parses marks data for all sections of a given semester.
+    Downloads and parses marks for all sections of a given semester.
 
-    One login per semester sub-site. After login, reads the subjectcode1
-    dropdown to discover all sections assigned to this faculty, then POSTs
-    the form once per section and merges results into one flat list.
+    Navigates the portal exactly as a human would:
+      login → examhome → exams menu → RSMSubAll form → POST per section
     """
 
     def __init__(self, auth: PortalAuth):
@@ -75,62 +57,19 @@ class SemesterScraper:
         self, admission_year: int, semester: int
     ) -> list[dict]:
         """
-        Log in to a semester sub-site and scrape the subjectcode1 dropdown
-        to discover which sections are available for this faculty.
-
-        Args:
-            admission_year: 4-digit batch year e.g. 2020
-            semester:       Semester number 1–8
+        Log in and navigate to RSMSubAll.jsp to read the section dropdown.
 
         Returns:
-            List of dicts: [{"label": "11", "value": "11"}, ...]
-            Returns [] if login fails or dropdown cannot be found.
+            [{"label": "11", "value": "11"}, ...]  or [] on failure.
         """
-        try:
-            session = self.auth.login(admission_year, semester)
-        except AuthError as exc:
-            logger.error("Cannot fetch sections — login failed: %s", exc)
+        session = self._login_and_navigate(admission_year, semester)
+        if session is None:
             return []
 
         sem_urls = get_semester_urls(admission_year, self.auth.base_host)
         marks_url = sem_urls[semester]
 
-        try:
-            examhome_url = get_examhome_url(
-                admission_year, semester, self.auth.base_host
-            )
-            session.get(examhome_url, timeout=30)
-
-            resp = session.get(marks_url, timeout=30)
-            resp.raise_for_status()
-
-            soup = BeautifulSoup(resp.text, "lxml")
-            select = soup.find("select", {"name": "subjectcode1"})
-            if not select:
-                logger.warning(
-                    "subjectcode1 dropdown not found on %s", marks_url
-                )
-                return []
-
-            options = []
-            for opt in select.find_all("option"):
-                val = opt.get("value", "").strip()
-                label = opt.get_text(strip=True)
-                if val:
-                    options.append({"label": label, "value": val})
-
-            logger.info(
-                "Found %d section(s) for year %d sem %d: %s",
-                len(options),
-                admission_year,
-                semester,
-                [o["label"] for o in options],
-            )
-            return options
-
-        except Exception as exc:
-            logger.warning("Could not fetch section list: %s", exc, exc_info=True)
-            return []
+        return self._read_sections_from_form(session, marks_url, semester)
 
     def scrape_all_sections(
         self,
@@ -139,41 +78,20 @@ class SemesterScraper:
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> list[dict]:
         """
-        Scrape marks for ALL sections of a single semester and return a
-        flat list of records (one master dataset for that semester).
+        Log in, navigate, then download marks for every section in one go.
 
-        Args:
-            admission_year:     4-digit batch year e.g. 2020
-            semester:           Semester number 1–8
-            progress_callback:  Optional callable(current_idx, total_sections)
-
-        Returns:
-            Flat list of record dicts across all sections.
-            Each record has a 'Section' key with the subjectcode1 label.
+        Returns flat list of record dicts, one per student-subject row.
         """
-        # One login gives us the session + the section list
-        try:
-            session = self.auth.login(admission_year, semester)
-        except AuthError as exc:
-            logger.error("Login failed for sem %d: %s", semester, exc)
+        session = self._login_and_navigate(admission_year, semester)
+        if session is None:
             return []
 
         sem_urls = get_semester_urls(admission_year, self.auth.base_host)
         marks_url = sem_urls[semester]
 
-        # Visit examhome first
-        try:
-            examhome_url = get_examhome_url(
-                admission_year, semester, self.auth.base_host
-            )
-            session.get(examhome_url, timeout=30)
-        except Exception:
-            pass
-
-        # Read available sections from the form dropdown
         sections = self._read_sections_from_form(session, marks_url, semester)
         if not sections:
-            logger.warning("No sections found for sem %d — nothing to scrape", semester)
+            logger.warning("No sections found for sem %d", semester)
             return []
 
         all_records: list[dict] = []
@@ -182,9 +100,7 @@ class SemesterScraper:
         for idx, sec in enumerate(sections, start=1):
             sec_label = sec["label"]
             sec_value = sec["value"]
-            logger.info(
-                "Section %d/%d (subjectcode1=%s) …", idx, total, sec_label
-            )
+            logger.info("Section %d/%d (subjectcode1=%s)…", idx, total, sec_label)
 
             excel_bytes = self._post_marks_form(
                 session, marks_url, semester, sec_value
@@ -209,38 +125,120 @@ class SemesterScraper:
         section_value: str,
         section_label: str,
     ) -> list[dict]:
-        """
-        Download marks for one specific section of one semester.
-        Useful if the faculty wants to re-run just one section.
-        Returns [] on any failure.
-        """
-        try:
-            session = self.auth.login(admission_year, semester)
-        except AuthError as exc:
-            logger.warning("Sem %d login failed: %s", semester, exc)
+        """Download marks for one specific section. Returns [] on any failure."""
+        session = self._login_and_navigate(admission_year, semester)
+        if session is None:
             return []
 
         sem_urls = get_semester_urls(admission_year, self.auth.base_host)
         marks_url = sem_urls[semester]
 
-        try:
-            examhome_url = get_examhome_url(
-                admission_year, semester, self.auth.base_host
-            )
-            session.get(examhome_url, timeout=30)
-
-            excel_bytes = self._post_marks_form(
-                session, marks_url, semester, section_value
-            )
-            if excel_bytes is None:
-                return []
-            return self._parse_excel(excel_bytes, semester, section_label)
-
-        except Exception as exc:
-            logger.warning("Sem %d sec %s error: %s", semester, section_label, exc, exc_info=True)
+        excel_bytes = self._post_marks_form(
+            session, marks_url, semester, section_value
+        )
+        if excel_bytes is None:
             return []
+        return self._parse_excel(excel_bytes, semester, section_label)
 
-    # ── Private helpers ────────────────────────────────────────────────────
+    # ── Navigation ─────────────────────────────────────────────────────────
+
+    def _login_and_navigate(
+        self, admission_year: int, semester: int
+    ) -> requests.Session | None:
+        """
+        Perform the full human navigation path and return an authenticated
+        session that has visited all required intermediate pages.
+
+        Path:
+          1. Login via auth.py  (POST login.jsp → session cookie)
+          2. GET examhome.jsp   (portal landing page after login)
+          3. Find and follow the Exams / Exams-norms menu link
+             (this sets server-side navigation state some portals require)
+          4. Return the session — caller can now safely GET RSMSubAll.jsp
+
+        Returns None if login fails.
+        """
+        # Step 1 — login
+        try:
+            session = self.auth.login(admission_year, semester)
+        except AuthError as exc:
+            logger.error("Login failed for sem %d: %s", semester, exc)
+            return None
+
+        base_host = self.auth.base_host
+        subsite   = f"https://{base_host}/a{admission_year}{semester}"
+
+        # Step 2 — visit examhome.jsp
+        examhome_url = get_examhome_url(admission_year, semester, base_host)
+        try:
+            resp = session.get(examhome_url, timeout=30)
+            logger.debug("examhome → %s  status=%d", resp.url, resp.status_code)
+        except Exception as exc:
+            logger.warning("Could not reach examhome.jsp: %s", exc)
+            # Non-fatal — continue and try anyway
+
+        # Step 3 — find the Exams / Exams-norms navigation link and follow it
+        #
+        # The portal nav bar has a link labelled "Exams-norms" (or similar).
+        # Following it tells the server the user navigated via the menu,
+        # which may be required before RSMSubAll.jsp is accessible.
+        try:
+            exam_link = self._find_exam_nav_link(session, examhome_url, subsite)
+            if exam_link:
+                logger.debug("Following exam nav link: %s", exam_link)
+                session.get(exam_link, timeout=30)
+            else:
+                logger.debug(
+                    "Exam nav link not found on examhome — "
+                    "trying RSMSubAll.jsp directly"
+                )
+        except Exception as exc:
+            logger.warning("Error following exam nav link: %s", exc)
+
+        return session
+
+    def _find_exam_nav_link(
+        self,
+        session: requests.Session,
+        examhome_url: str,
+        subsite: str,
+    ) -> str | None:
+        """
+        Parse examhome.jsp and find the link to the Exams / Exams-norms section.
+
+        Looks for <a> tags whose text contains keywords like:
+          'exam', 'exams-norms', 'section marks', 'rsm'
+
+        Returns the full URL of the first matching link, or None if not found.
+        """
+        try:
+            resp = session.get(examhome_url, timeout=30)
+            soup = BeautifulSoup(resp.text, "lxml")
+        except Exception as exc:
+            logger.warning("Cannot parse examhome.jsp: %s", exc)
+            return None
+
+        keywords = ["exam", "section marks", "rsm", "marks"]
+
+        for a in soup.find_all("a", href=True):
+            text = a.get_text(strip=True).lower()
+            href = a["href"]
+            if any(kw in text for kw in keywords) or any(kw in href.lower() for kw in keywords):
+                # Build absolute URL
+                if href.startswith("http"):
+                    return href
+                elif href.startswith("/"):
+                    # Absolute path — use subsite scheme+host
+                    from urllib.parse import urlparse
+                    parsed = urlparse(subsite)
+                    return f"{parsed.scheme}://{parsed.netloc}{href}"
+                else:
+                    # Relative path — resolve against subsite base
+                    return f"{subsite}/{href.lstrip('/')}"
+
+        return None
+
+    # ── Form helpers ───────────────────────────────────────────────────────
 
     def _read_sections_from_form(
         self,
@@ -248,24 +246,53 @@ class SemesterScraper:
         marks_url: str,
         semester: int,
     ) -> list[dict]:
-        """GET the marks form page and extract subjectcode1 options."""
+        """GET the marks form and extract subjectcode1 options."""
         try:
             resp = session.get(marks_url, timeout=30)
-            resp.raise_for_status()
+            logger.debug(
+                "RSMSubAll GET → %s  status=%d  size=%d",
+                resp.url, resp.status_code, len(resp.content)
+            )
+
+            # If redirected to login, session is not valid
+            if "login" in resp.url.lower():
+                logger.warning(
+                    "Sem %d — redirected to login when fetching RSMSubAll.jsp. "
+                    "Session may not have been accepted by the portal.",
+                    semester,
+                )
+                return []
+
             soup = BeautifulSoup(resp.text, "lxml")
             select = soup.find("select", {"name": "subjectcode1"})
             if not select:
-                logger.warning("subjectcode1 dropdown not found on %s", marks_url)
+                # Log a snippet of the page to help diagnose
+                snippet = resp.text[:500].replace("\n", " ")
+                logger.warning(
+                    "Sem %d — subjectcode1 dropdown not found. "
+                    "Page snippet: %s",
+                    semester, snippet
+                )
                 return []
+
             options = []
             for opt in select.find_all("option"):
-                val = opt.get("value", "").strip()
+                val   = opt.get("value", "").strip()
                 label = opt.get_text(strip=True)
                 if val:
                     options.append({"label": label, "value": val})
+
+            logger.info(
+                "Sem %d — found %d section(s): %s",
+                semester, len(options), [o["label"] for o in options]
+            )
             return options
+
         except Exception as exc:
-            logger.warning("Sem %d — could not read section dropdown: %s", semester, exc)
+            logger.warning(
+                "Sem %d — error reading section dropdown: %s", semester, exc,
+                exc_info=True
+            )
             return []
 
     def _post_marks_form(
@@ -275,10 +302,7 @@ class SemesterScraper:
         semester: int,
         section_value: str,
     ) -> bytes | None:
-        """
-        POST the RSMSubAll form and return the raw Excel file bytes.
-        Returns None if the response is not a valid spreadsheet.
-        """
+        """POST the RSMSubAll form and return raw Excel bytes, or None."""
         payload = {
             "coursecode":   _COURSE_CODE,
             "branchcode":   _BRANCH_CODE,
@@ -288,7 +312,6 @@ class SemesterScraper:
             "excel":        "YES",
             "next":         "submit",
         }
-
         logger.debug("POST %s  payload=%s", url, payload)
 
         try:
@@ -298,18 +321,14 @@ class SemesterScraper:
             return None
 
         if resp.status_code != 200:
-            logger.warning(
-                "Sem %d — HTTP %d from %s", semester, resp.status_code, url
-            )
+            logger.warning("Sem %d — HTTP %d", semester, resp.status_code)
             return None
 
         content_type = resp.headers.get("Content-Type", "").lower()
         if "html" in content_type:
-            # Derive subsite base robustly from the URL
             from urllib.parse import urlparse
-            parsed = urlparse(url)
-            # path is like /a20201/RSMSubAll.jsp — take up to the second slash
-            parts = parsed.path.strip("/").split("/")
+            parsed      = urlparse(url)
+            parts       = parsed.path.strip("/").split("/")
             subsite_path = "/" + parts[0] if parts else "/"
             subsite_base = f"{parsed.scheme}://{parsed.netloc}{subsite_path}"
 
@@ -318,29 +337,24 @@ class SemesterScraper:
             else:
                 logger.warning(
                     "Sem %d — portal returned HTML instead of Excel "
-                    "(data may not be available yet)",
+                    "(data may not be uploaded yet)",
                     semester,
                 )
             return None
 
-        content = resp.content
-        if len(content) < 512:
+        if len(resp.content) < 512:
             logger.warning(
-                "Sem %d — response too small (%d bytes), likely empty",
-                semester, len(content)
+                "Sem %d — response too small (%d bytes)",
+                semester, len(resp.content)
             )
             return None
 
-        logger.debug("Sem %d — received %d bytes", semester, len(content))
-        return content
+        return resp.content
 
     def _parse_excel(
         self, excel_bytes: bytes, semester: int, section_label: str
     ) -> list[dict]:
-        """
-        Parse the Excel binary into a list of dicts.
-        Adds 'Semester' and 'Section' columns to every record.
-        """
+        """Parse Excel binary into list of dicts with Semester + Section columns."""
         for engine in ("openpyxl", "xlrd"):
             try:
                 df = pd.read_excel(
@@ -353,18 +367,19 @@ class SemesterScraper:
             except Exception:
                 continue
         else:
-            logger.warning("Sem %d sec %s — could not parse Excel", semester, section_label)
+            logger.warning(
+                "Sem %d sec %s — could not parse Excel", semester, section_label
+            )
             return []
 
         if df.empty:
             return []
 
-        df.columns = [str(c).strip() for c in df.columns]
+        df.columns    = [str(c).strip() for c in df.columns]
         df.dropna(how="all", inplace=True)
         df.fillna("", inplace=True)
 
-        # Prepend Semester and Section columns
-        df.insert(0, "Section", section_label)
+        df.insert(0, "Section",  section_label)
         df.insert(0, "Semester", semester)
 
         return df.to_dict(orient="records")
