@@ -1,0 +1,4 @@
+{
+  "_comment": "Optional URL overrides. Key format: '{admission_year}_{semester}'. If a key matches, that URL is used instead of the auto-generated one.",
+  "overrides": {}
+}
