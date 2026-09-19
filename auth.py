@@ -53,12 +53,11 @@ class PortalAuth:
         self.password = password or os.getenv("PORTAL_PASSWORD", "")
 
         # Login form field names — default to common JSP pattern
-        self.user_field = user_field or os.getenv("PORTAL_LOGIN_USER_FIELD", "j_username")
-        self.pass_field = pass_field or os.getenv("PORTAL_LOGIN_PASS_FIELD", "j_password")
+        self.user_field = user_field or os.getenv("PORTAL_LOGIN_USER_FIELD", "user")
+        self.pass_field = pass_field or os.getenv("PORTAL_LOGIN_PASS_FIELD", "pwd")
 
-        # Login path relative to the semester sub-site root
-        # e.g. "/j_security_check" or "/login.jsp" depending on the portal
-        self.login_path = login_path or os.getenv("PORTAL_LOGIN_PATH", "/j_security_check")
+        # Login path — portal POSTs back to login.jsp itself
+        self.login_path = login_path or os.getenv("PORTAL_LOGIN_PATH", "/login.jsp")
 
         # SSL verification — default False for internal self-signed certs
         if verify_ssl is not None:
@@ -110,10 +109,44 @@ class PortalAuth:
 
         # Step 2: POST credentials to the login action endpoint
         login_post_url = f"{subsite_base}{self.login_path}"
-        payload = {
-            self.user_field: self.username,
-            self.pass_field: self.password,
-        }
+
+        # Parse any hidden fields from the login page form and include them
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(resp.text, "lxml")
+        payload = {}
+        form = soup.find("form")
+        if form:
+            for hidden in form.find_all("input", {"type": "hidden"}):
+                name = hidden.get("name", "")
+                value = hidden.get("value", "")
+                if name:
+                    payload[name] = value
+            # Also pick up any visible inputs with default values
+            for inp in form.find_all("input"):
+                name = inp.get("name", "")
+                inp_type = inp.get("type", "text").lower()
+                if name and inp_type not in ("password", "submit", "button", "image"):
+                    if name not in payload:
+                        payload[name] = inp.get("value", "")
+
+        # Set the actual credentials (override any pre-filled values)
+        payload[self.user_field] = self.username
+        payload[self.pass_field] = self.password
+
+        # Keep only the LOGIN submit button — remove Reset and other submits
+        # Sending multiple submit buttons confuses some portal implementations
+        keys_to_remove = []
+        if form:
+            for inp in form.find_all("input", {"type": "submit"}):
+                name = inp.get("name", "")
+                val  = inp.get("value", "")
+                # Remove any submit that isn't the login button
+                if name and val and not any(
+                    w in val.lower() for w in ["login", "log in", "signin", "sign in"]
+                ):
+                    keys_to_remove.append(name)
+        for k in keys_to_remove:
+            payload.pop(k, None)
 
         try:
             resp = session.post(login_post_url, data=payload, timeout=30, allow_redirects=True)
@@ -163,18 +196,14 @@ class PortalAuth:
     def _is_login_page(self, response: requests.Response, subsite_base: str) -> bool:
         """
         Heuristic: detect if we have been redirected back to the login page.
-
-        Checks:
-          - Final URL contains 'login' in the path
-          - Response body contains the login form field names
         """
         final_url = response.url.lower()
         if "login" in final_url:
             return True
 
         body = response.text.lower()
-        # Check for the presence of password field name in the form
-        if self.pass_field.lower() in body and "<form" in body:
+        # Check for login form — look for user/pwd fields inside a form
+        if ("name=\"user\"" in body or "name='user'" in body) and "<form" in body:
             return True
 
         return False
