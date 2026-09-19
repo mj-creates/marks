@@ -205,68 +205,52 @@ def show_main_page():
             )
             scraper = SemesterScraper(auth)
 
-            # Step 1 — discover sections
+            # Single login — scrape_all_sections discovers sections internally
+            # and returns all records in one shot (no separate get_available_sections call)
             status_text.info(
-                f"🔍 Fetching sections for {selected_year} · "
-                f"Semester {selected_semester}…"
+                f"🔍 Logging in and fetching sections for "
+                f"{selected_year} · Semester {selected_semester}…"
             )
-            sections = scraper.get_available_sections(
+
+            def on_progress(idx, total):
+                progress_bar.progress(
+                    idx / total,
+                    text=f"Section {idx} of {total} done",
+                )
+                status_text.info(f"⏳ Processing section {idx} of {total}…")
+
+            all_records = scraper.scrape_all_sections(
                 admission_year=selected_year,
                 semester=selected_semester,
+                progress_callback=on_progress,
             )
 
-            if not sections:
-                no_sections = True
-            else:
-                total_sections = len(sections)
-                st.info(
-                    f"Found **{total_sections}** section(s): "
-                    + ", ".join(s["label"] for s in sections)
+            progress_bar.progress(1.0, text="✅ All sections processed")
+
+            if all_records:
+                secs_with_data = len(
+                    {r.get("Section") for r in all_records if r.get("Section")}
                 )
-
-                # Step 2 — scrape every section
-                def on_progress(idx, total):
-                    progress_bar.progress(
-                        idx / total,
-                        text=f"Section {idx} of {total} done",
-                    )
-                    status_text.info(
-                        f"⏳ Processing section {idx} of {total}…"
-                    )
-
-                all_records = scraper.scrape_all_sections(
+                st.info(
+                    f"Found **{secs_with_data}** section(s) with data."
+                )
+                status_text.info("💾 Building Excel file…")
+                output_path = export_to_excel(
+                    records=all_records,
                     admission_year=selected_year,
                     semester=selected_semester,
-                    progress_callback=on_progress,
+                    output_dir="output",
                 )
-
-                progress_bar.progress(1.0, text="✅ All sections processed")
-
-                if all_records:
-                    status_text.info("💾 Building Excel file…")
-                    output_path = export_to_excel(
-                        records=all_records,
-                        admission_year=selected_year,
-                        semester=selected_semester,
-                        output_dir="output",
-                    )
-                    st.session_state["report_bytes"] = _read_file_bytes(output_path)
-                    st.session_state["report_name"]  = Path(output_path).name
-
-                    secs_with_data = len(
-                        {r.get("Section") for r in all_records if r.get("Section")}
-                    )
-                    status_text.empty()
-                    st.success(
-                        f"✅ Done — **{len(all_records)} rows** across "
-                        f"**{secs_with_data}** section(s)."
-                    )
-                else:
-                    status_text.empty()
-                    st.warning(
-                        "⚠️ No data returned for any section. "
-                        "The semester data may not be uploaded yet on the portal."
-                    )
+                st.session_state["report_bytes"] = _read_file_bytes(output_path)
+                st.session_state["report_name"]  = Path(output_path).name
+                status_text.empty()
+                st.success(
+                    f"✅ Done — **{len(all_records)} rows** across "
+                    f"**{secs_with_data}** section(s)."
+                )
+            else:
+                status_text.empty()
+                no_sections = True
 
         except AuthError as exc:
             status_text.empty()

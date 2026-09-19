@@ -4,10 +4,10 @@ scraper.py — Semester Marks Downloader
 Follows the exact same navigation path a human takes in the browser:
 
   1. POST login.jsp          → authenticated session
-  2. GET  examhome.jsp       → portal home after login
-  3. GET  the Exams-norms menu link  (sets server-side nav state)
-  4. GET  RSMSubAll.jsp      → "Section Marks All Subjects" form page
-  5. Read subjectcode1 dropdown  → list of sections for this faculty
+  2. GET  examhome.jsp       → portal home after login (parsed once, reused)
+  3. Follow the Exams-norms menu link from the already-parsed page
+  4. GET  RSMSubAll.jsp      → "Section Marks All Subjects" form
+  5. Read subjectcode1 dropdown  → sections available to this faculty
   6. POST RSMSubAll.jsp once per section with excel=YES
   7. Parse the downloaded Excel binary with pandas
   8. Tag every row with Semester + Section and return flat list
@@ -24,6 +24,7 @@ Confirmed form fields (browser network payload):
 
 import io
 import logging
+from urllib.parse import urlparse
 from typing import Callable
 
 import pandas as pd
@@ -66,9 +67,8 @@ class SemesterScraper:
         if session is None:
             return []
 
-        sem_urls = get_semester_urls(admission_year, self.auth.base_host)
+        sem_urls  = get_semester_urls(admission_year, self.auth.base_host)
         marks_url = sem_urls[semester]
-
         return self._read_sections_from_form(session, marks_url, semester)
 
     def scrape_all_sections(
@@ -78,15 +78,16 @@ class SemesterScraper:
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> list[dict]:
         """
-        Log in, navigate, then download marks for every section in one go.
+        Log in once, navigate, then download marks for every section.
 
         Returns flat list of record dicts, one per student-subject row.
+        Sections with no data are skipped gracefully.
         """
         session = self._login_and_navigate(admission_year, semester)
         if session is None:
             return []
 
-        sem_urls = get_semester_urls(admission_year, self.auth.base_host)
+        sem_urls  = get_semester_urls(admission_year, self.auth.base_host)
         marks_url = sem_urls[semester]
 
         sections = self._read_sections_from_form(session, marks_url, semester)
@@ -107,7 +108,7 @@ class SemesterScraper:
             )
 
             if excel_bytes is None:
-                logger.warning("  Section %s — no data", sec_label)
+                logger.warning("  Section %s — no data returned", sec_label)
             else:
                 records = self._parse_excel(excel_bytes, semester, sec_label)
                 logger.info("  Section %s — %d rows", sec_label, len(records))
@@ -130,12 +131,10 @@ class SemesterScraper:
         if session is None:
             return []
 
-        sem_urls = get_semester_urls(admission_year, self.auth.base_host)
+        sem_urls  = get_semester_urls(admission_year, self.auth.base_host)
         marks_url = sem_urls[semester]
 
-        excel_bytes = self._post_marks_form(
-            session, marks_url, semester, section_value
-        )
+        excel_bytes = self._post_marks_form(session, marks_url, semester, section_value)
         if excel_bytes is None:
             return []
         return self._parse_excel(excel_bytes, semester, section_label)
@@ -146,19 +145,13 @@ class SemesterScraper:
         self, admission_year: int, semester: int
     ) -> requests.Session | None:
         """
-        Perform the full human navigation path and return an authenticated
-        session that has visited all required intermediate pages.
+        Full human navigation path. Returns an authenticated session that
+        has visited all intermediate pages, or None if login fails.
 
-        Path:
-          1. Login via auth.py  (POST login.jsp → session cookie)
-          2. GET examhome.jsp   (portal landing page after login)
-          3. Find and follow the Exams / Exams-norms menu link
-             (this sets server-side navigation state some portals require)
-          4. Return the session — caller can now safely GET RSMSubAll.jsp
-
-        Returns None if login fails.
+          1. POST login.jsp          → session cookie
+          2. GET  examhome.jsp       → parse once, keep soup
+          3. Follow exam nav link    → using soup from step 2 (no extra GET)
         """
-        # Step 1 — login
         try:
             session = self.auth.login(admission_year, semester)
         except AuthError as exc:
@@ -168,72 +161,58 @@ class SemesterScraper:
         base_host = self.auth.base_host
         subsite   = f"https://{base_host}/a{admission_year}{semester}"
 
-        # Step 2 — visit examhome.jsp
+        # Step 2 — GET examhome.jsp once and parse it
         examhome_url = get_examhome_url(admission_year, semester, base_host)
+        examhome_soup = None
         try:
             resp = session.get(examhome_url, timeout=30)
             logger.debug("examhome → %s  status=%d", resp.url, resp.status_code)
+            examhome_soup = BeautifulSoup(resp.text, "lxml")
         except Exception as exc:
             logger.warning("Could not reach examhome.jsp: %s", exc)
-            # Non-fatal — continue and try anyway
+            # Non-fatal — continue and attempt RSMSubAll.jsp directly
 
-        # Step 3 — find the Exams / Exams-norms navigation link and follow it
-        #
-        # The portal nav bar has a link labelled "Exams-norms" (or similar).
-        # Following it tells the server the user navigated via the menu,
-        # which may be required before RSMSubAll.jsp is accessible.
+        # Step 3 — find and follow the Exams nav link using the already-parsed soup
+        # (no second GET of examhome — reuse soup from step 2)
         try:
-            exam_link = self._find_exam_nav_link(session, examhome_url, subsite)
+            exam_link = self._find_exam_nav_link_from_soup(examhome_soup, subsite)
             if exam_link:
                 logger.debug("Following exam nav link: %s", exam_link)
                 session.get(exam_link, timeout=30)
             else:
-                logger.debug(
-                    "Exam nav link not found on examhome — "
-                    "trying RSMSubAll.jsp directly"
-                )
+                logger.debug("Exam nav link not found — will try RSMSubAll.jsp directly")
         except Exception as exc:
             logger.warning("Error following exam nav link: %s", exc)
 
         return session
 
-    def _find_exam_nav_link(
+    def _find_exam_nav_link_from_soup(
         self,
-        session: requests.Session,
-        examhome_url: str,
+        soup: BeautifulSoup | None,
         subsite: str,
     ) -> str | None:
         """
-        Parse examhome.jsp and find the link to the Exams / Exams-norms section.
+        Find the Exams / Exams-norms nav link from an already-parsed soup.
+        Uses the soup from the examhome GET — no extra network call.
 
-        Looks for <a> tags whose text contains keywords like:
-          'exam', 'exams-norms', 'section marks', 'rsm'
-
-        Returns the full URL of the first matching link, or None if not found.
+        Looks for <a> tags whose text or href contains exam-related keywords.
+        Returns a full absolute URL, or None if not found.
         """
-        try:
-            resp = session.get(examhome_url, timeout=30)
-            soup = BeautifulSoup(resp.text, "lxml")
-        except Exception as exc:
-            logger.warning("Cannot parse examhome.jsp: %s", exc)
+        if soup is None:
             return None
 
         keywords = ["exam", "section marks", "rsm", "marks"]
+        parsed_subsite = urlparse(subsite)
 
         for a in soup.find_all("a", href=True):
             text = a.get_text(strip=True).lower()
             href = a["href"]
             if any(kw in text for kw in keywords) or any(kw in href.lower() for kw in keywords):
-                # Build absolute URL
                 if href.startswith("http"):
                     return href
                 elif href.startswith("/"):
-                    # Absolute path — use subsite scheme+host
-                    from urllib.parse import urlparse
-                    parsed = urlparse(subsite)
-                    return f"{parsed.scheme}://{parsed.netloc}{href}"
+                    return f"{parsed_subsite.scheme}://{parsed_subsite.netloc}{href}"
                 else:
-                    # Relative path — resolve against subsite base
                     return f"{subsite}/{href.lstrip('/')}"
 
         return None
@@ -246,7 +225,7 @@ class SemesterScraper:
         marks_url: str,
         semester: int,
     ) -> list[dict]:
-        """GET the marks form and extract subjectcode1 options."""
+        """GET the marks form page and extract subjectcode1 dropdown options."""
         try:
             resp = session.get(marks_url, timeout=30)
             logger.debug(
@@ -254,23 +233,22 @@ class SemesterScraper:
                 resp.url, resp.status_code, len(resp.content)
             )
 
-            # If redirected to login, session is not valid
-            if "login" in resp.url.lower():
+            # Use endswith to avoid false positives from query params
+            if resp.url.lower().endswith("login.jsp"):
                 logger.warning(
-                    "Sem %d — redirected to login when fetching RSMSubAll.jsp. "
-                    "Session may not have been accepted by the portal.",
+                    "Sem %d — redirected to login.jsp when fetching RSMSubAll. "
+                    "Session was not accepted by the portal.",
                     semester,
                 )
                 return []
 
-            soup = BeautifulSoup(resp.text, "lxml")
+            soup   = BeautifulSoup(resp.text, "lxml")
             select = soup.find("select", {"name": "subjectcode1"})
             if not select:
-                # Log a snippet of the page to help diagnose
                 snippet = resp.text[:500].replace("\n", " ")
                 logger.warning(
-                    "Sem %d — subjectcode1 dropdown not found. "
-                    "Page snippet: %s",
+                    "Sem %d — subjectcode1 dropdown not found on page. "
+                    "First 500 chars: %s",
                     semester, snippet
                 )
                 return []
@@ -290,8 +268,8 @@ class SemesterScraper:
 
         except Exception as exc:
             logger.warning(
-                "Sem %d — error reading section dropdown: %s", semester, exc,
-                exc_info=True
+                "Sem %d — error reading section dropdown: %s",
+                semester, exc, exc_info=True
             )
             return []
 
@@ -321,31 +299,30 @@ class SemesterScraper:
             return None
 
         if resp.status_code != 200:
-            logger.warning("Sem %d — HTTP %d", semester, resp.status_code)
+            logger.warning("Sem %d — HTTP %d from portal", semester, resp.status_code)
             return None
 
         content_type = resp.headers.get("Content-Type", "").lower()
         if "html" in content_type:
-            from urllib.parse import urlparse
-            parsed      = urlparse(url)
-            parts       = parsed.path.strip("/").split("/")
-            subsite_path = "/" + parts[0] if parts else "/"
-            subsite_base = f"{parsed.scheme}://{parsed.netloc}{subsite_path}"
+            # Reconstruct subsite base from URL for session-expiry check
+            parsed       = urlparse(url)
+            parts        = parsed.path.strip("/").split("/")
+            subsite_base = f"{parsed.scheme}://{parsed.netloc}/{parts[0]}"
 
             if self.auth._is_login_page(resp, subsite_base):
-                logger.warning("Sem %d — session expired mid-run", semester)
+                logger.warning("Sem %d sec %s — session expired mid-run", semester, section_value)
             else:
                 logger.warning(
-                    "Sem %d — portal returned HTML instead of Excel "
-                    "(data may not be uploaded yet)",
-                    semester,
+                    "Sem %d sec %s — portal returned HTML instead of Excel "
+                    "(marks may not be uploaded yet)",
+                    semester, section_value,
                 )
             return None
 
         if len(resp.content) < 512:
             logger.warning(
-                "Sem %d — response too small (%d bytes)",
-                semester, len(resp.content)
+                "Sem %d sec %s — response only %d bytes, likely empty",
+                semester, section_value, len(resp.content)
             )
             return None
 
@@ -354,13 +331,17 @@ class SemesterScraper:
     def _parse_excel(
         self, excel_bytes: bytes, semester: int, section_label: str
     ) -> list[dict]:
-        """Parse Excel binary into list of dicts with Semester + Section columns."""
+        """
+        Parse Excel binary into list of dicts.
+        Prepends Semester (int) and Section (str) columns to every record.
+        Handles both .xls (xlrd) and .xlsx (openpyxl) formats.
+        """
         for engine in ("openpyxl", "xlrd"):
             try:
                 df = pd.read_excel(
                     io.BytesIO(excel_bytes),
                     engine=engine,
-                    dtype=str,
+                    dtype=str,   # keep marks as strings — preserves "AB", "--"
                     header=0,
                 )
                 break
@@ -368,17 +349,20 @@ class SemesterScraper:
                 continue
         else:
             logger.warning(
-                "Sem %d sec %s — could not parse Excel", semester, section_label
+                "Sem %d sec %s — could not parse Excel with any engine",
+                semester, section_label
             )
             return []
 
         if df.empty:
+            logger.warning("Sem %d sec %s — Excel has no rows", semester, section_label)
             return []
 
-        df.columns    = [str(c).strip() for c in df.columns]
+        df.columns = [str(c).strip() for c in df.columns]
         df.dropna(how="all", inplace=True)
         df.fillna("", inplace=True)
 
+        # Insert identifying columns at front: col 0 = Semester, col 1 = Section
         df.insert(0, "Section",  section_label)
         df.insert(0, "Semester", semester)
 

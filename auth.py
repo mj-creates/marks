@@ -195,15 +195,20 @@ class PortalAuth:
 
     def _is_login_page(self, response: requests.Response, subsite_base: str) -> bool:
         """
-        Heuristic: detect if we have been redirected back to the login page.
+        Detect if we have been redirected back to the login page.
+        Uses endswith check to avoid false positives from redirect params.
         """
         final_url = response.url.lower()
-        if "login" in final_url:
+        if final_url.endswith("login.jsp"):
             return True
 
         body = response.text.lower()
-        # Check for login form — look for user/pwd fields inside a form
-        if ("name=\"user\"" in body or "name='user'" in body) and "<form" in body:
+        # Use the configured user field name for body check
+        user_field_lower = self.user_field.lower()
+        if (
+            f'name="{user_field_lower}"' in body
+            or f"name='{user_field_lower}'" in body
+        ) and "<form" in body:
             return True
 
         return False
