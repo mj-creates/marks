@@ -54,13 +54,15 @@ for _key, _default in [
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 def _get_batch_years():
-    """Return list of admission years newest-first."""
+    """Return list of admission years newest-first, up to last year."""
     current_year = datetime.now().year
     try:
         start_year = int(os.getenv("PORTAL_BATCH_START_YEAR", "2018"))
     except ValueError:
         start_year = 2018
-    return list(range(current_year, start_year - 1, -1))
+    # Stop at current_year - 1: current calendar year batch not deployed yet
+    end_year = current_year - 1
+    return list(range(end_year, start_year - 1, -1))
 
 
 def _read_file_bytes(path):
@@ -70,29 +72,28 @@ def _read_file_bytes(path):
 
 def _verify_credentials(username, password, batch_years):
     """
-    Verify credentials by trying to log in to the selected batch year sem 1.
-    Falls back to older years if the newest sub-site does not exist yet,
-    so a connection error on the newest year does not block valid faculty.
+    Verify credentials by trying to log in to semester 1 of known batch years.
+    Tries oldest years first since they are most reliably deployed on the portal.
 
     Returns (True, None) on success, (False, error_message) on failure.
     """
     auth = PortalAuth(username=username, password=password)
 
-    # Try the three most recent years in case the newest isn't deployed
-    for year in batch_years[:3]:
+    # Try oldest → newest; stop as soon as one sub-site responds
+    for year in reversed(batch_years):
         try:
             auth.login(admission_year=year, semester=1)
-            return True, None          # any successful login = credentials OK
+            return True, None          # credentials accepted
         except AuthError as exc:
-            # Wrong credentials — no point trying other years
+            # Portal responded but rejected credentials — no point trying others
             return False, str(exc)
         except Exception:
-            # Connection error / sub-site not found — try next year
+            # Sub-site not reachable — try next year
             continue
 
     return False, (
-        "Could not reach the portal. Make sure you are on the college "
-        "network and the portal is accessible."
+        "Could not reach any batch sub-site on the portal. "
+        "Make sure you are connected to the college network."
     )
 
 
