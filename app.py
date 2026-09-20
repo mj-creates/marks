@@ -1,4 +1,4 @@
-﻿import logging, os
+import logging, os
 from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
@@ -58,22 +58,18 @@ def show_login_page():
                 return
             from url_mapper import build_subsite_code
             code = build_subsite_code(batch_year, study_year, sem_digit)
-            with st.spinner(f'Logging in to a{code} ({batch_year} batch, Year {study_year}, Sem {sem_digit})...'):
-                try:
-                    auth = PortalAuth(username=username, password=password)
-                    auth.login(admission_year=batch_year, study_year=study_year, sem_digit=sem_digit)
-                    st.session_state['logged_in']   = True
-                    st.session_state['username']    = username
-                    st.session_state['password']    = password
-                    st.session_state['batch_year']  = batch_year
-                    st.session_state['study_year']  = study_year
-                    st.session_state['sem_digit']   = sem_digit
-                    st.session_state['portal_auth'] = auth
-                    st.rerun()
-                except AuthError as exc:
-                    st.error(f'Login failed: {exc}')
-                except Exception as exc:
-                    st.error(f'Could not connect to portal: {exc}')
+            # Store credentials and proceed — the actual login happens once
+            # inside Generate Report (scrape_all_sections -> _login_and_navigate).
+            # Calling auth.login() here AND in Generate Report causes double-login.
+            auth = PortalAuth(username=username, password=password)
+            st.session_state['logged_in']   = True
+            st.session_state['username']    = username
+            st.session_state['password']    = password
+            st.session_state['batch_year']  = batch_year
+            st.session_state['study_year']  = study_year
+            st.session_state['sem_digit']   = sem_digit
+            st.session_state['portal_auth'] = auth
+            st.rerun()
         st.markdown(
             "<p style='text-align:center;color:gray;font-size:12px;margin-top:20px;'>"
             "Credentials are used only to access the portal and are never stored.</p>",
@@ -166,3 +162,4 @@ if st.session_state['logged_in']:
     show_main_page()
 else:
     show_login_page()
+
