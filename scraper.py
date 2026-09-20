@@ -7,6 +7,7 @@ Follows the exact same navigation path a human takes in the browser:
   2. GET  examhome.jsp       → portal home after login (parsed once, reused)
   3. Follow the Exams-norms menu link from the already-parsed page
   4. GET  RSMSubAll.jsp      → "Section Marks All Subjects" form
+     (sends Referer: examhome.jsp URL, logs exact Cookie header being sent)
   5. Read subjectcode1 dropdown  → sections available to this faculty
   6. POST RSMSubAll.jsp once per section with excel=YES
   7. Parse the downloaded Excel binary with pandas
@@ -46,7 +47,7 @@ from url_mapper import (
 
 logger = logging.getLogger(__name__)
 
-# ── Fixed portal form values ───────────────────────────────────────────────
+# Fixed portal form values
 _COURSE_CODE = "A"    # B.Tech
 _BRANCH_CODE = "04"   # CSE
 
@@ -72,21 +73,15 @@ class SemesterScraper:
     ) -> list[dict]:
         """
         Log in and navigate to RSMSubAll.jsp to read the section dropdown.
-
-        Args:
-            admission_year: 4-digit batch year e.g. 2020
-            study_year:     1–4
-            sem_digit:      1 or 2
-
-        Returns:
-            [{"label": "11", "value": "11"}, ...]  or [] on failure.
+        Returns [{"label": "11", "value": "11"}, ...] or [] on failure.
         """
         session = self._login_and_navigate(admission_year, study_year, sem_digit)
         if session is None:
             return []
 
-        marks_url = get_subsite_url(admission_year, study_year, sem_digit, self.auth.base_host)
-        return self._read_sections_from_form(session, marks_url, study_year, sem_digit)
+        marks_url    = get_subsite_url(admission_year, study_year, sem_digit, self.auth.base_host)
+        examhome_url = get_examhome_url(admission_year, study_year, sem_digit, self.auth.base_host)
+        return self._read_sections_from_form(session, marks_url, examhome_url, study_year, sem_digit)
 
     def scrape_all_sections(
         self,
@@ -97,23 +92,15 @@ class SemesterScraper:
     ) -> list[dict]:
         """
         Log in once, navigate, then download marks for every section.
-
-        Args:
-            admission_year: 4-digit batch year e.g. 2020
-            study_year:     1–4
-            sem_digit:      1 or 2
-            progress_callback: optional callable(current_idx, total_sections)
-
-        Returns:
-            Flat list of record dicts, one per student-subject row.
-            Each record has 'Semester' (human label) and 'Section' columns.
+        Returns flat list of record dicts, one per student-subject row.
         """
         session = self._login_and_navigate(admission_year, study_year, sem_digit)
         if session is None:
             return []
 
-        marks_url = get_subsite_url(admission_year, study_year, sem_digit, self.auth.base_host)
-        sections  = self._read_sections_from_form(session, marks_url, study_year, sem_digit)
+        marks_url    = get_subsite_url(admission_year, study_year, sem_digit, self.auth.base_host)
+        examhome_url = get_examhome_url(admission_year, study_year, sem_digit, self.auth.base_host)
+        sections     = self._read_sections_from_form(session, marks_url, examhome_url, study_year, sem_digit)
 
         if not sections:
             logger.warning(
@@ -128,9 +115,7 @@ class SemesterScraper:
         for idx, sec in enumerate(sections, start=1):
             sec_label = sec["label"]
             sec_value = sec["value"]
-            logger.info(
-                "Section %d/%d (subjectcode1=%s)…", idx, total, sec_label
-            )
+            logger.info("Section %d/%d (subjectcode1=%s)…", idx, total, sec_label)
 
             excel_bytes = self._post_marks_form(
                 session, marks_url, study_year, sem_digit, sec_value
@@ -139,9 +124,7 @@ class SemesterScraper:
             if excel_bytes is None:
                 logger.warning("  Section %s — no data returned", sec_label)
             else:
-                records = self._parse_excel(
-                    excel_bytes, study_year, sem_digit, sec_label
-                )
+                records = self._parse_excel(excel_bytes, study_year, sem_digit, sec_label)
                 logger.info("  Section %s — %d rows", sec_label, len(records))
                 all_records.extend(records)
 
@@ -205,11 +188,13 @@ class SemesterScraper:
         try:
             resp = session.get(examhome_url, timeout=30)
             logger.debug("examhome → %s  status=%d", resp.url, resp.status_code)
+            logger.debug("[SCRAPER] Cookies sent to examhome: %s",
+                         {c.name: len(c.value) for c in session.cookies})
             examhome_soup = BeautifulSoup(resp.text, "lxml")
         except Exception as exc:
             logger.warning("Could not reach examhome.jsp: %s", exc)
 
-        # Step 3 — follow exam nav link using the already-parsed soup
+        # Step 3 — follow exam nav link using the already-parsed soup (no extra GET)
         try:
             exam_link = self._find_exam_nav_link_from_soup(examhome_soup, subsite)
             if exam_link:
@@ -228,7 +213,7 @@ class SemesterScraper:
         subsite: str,
     ) -> str | None:
         """
-        Find the Exams / Exams-norms nav link from an already-parsed soup.
+        Find the Exams / Exams-norms nav link from already-parsed soup.
         Returns a full absolute URL or None.
         """
         if soup is None:
@@ -255,23 +240,43 @@ class SemesterScraper:
         self,
         session: requests.Session,
         marks_url: str,
+        examhome_url: str,
         study_year: int,
         sem_digit: int,
     ) -> list[dict]:
-        """GET the marks form page and extract subjectcode1 dropdown options."""
+        """
+        GET the marks form page with a Referer header matching examhome.jsp,
+        log the exact Cookie header being sent, and extract subjectcode1 options.
+        """
         try:
-            resp = session.get(marks_url, timeout=30)
-            logger.debug(
-                "RSMSubAll GET → %s  status=%d  size=%d",
+            # Log cookies about to be sent
+            cookie_header = "; ".join(
+                f"{c.name}=<len{len(c.value)}>" for c in session.cookies
+            )
+            logger.info(
+                "[SCRAPER] GET RSMSubAll — cookies in jar: %s", cookie_header or "(empty)"
+            )
+
+            # Send Referer: examhome.jsp — matches what a real browser sends
+            headers = {"Referer": examhome_url}
+            logger.info("[SCRAPER] GET RSMSubAll — Referer: %s", examhome_url)
+
+            resp = session.get(marks_url, headers=headers, timeout=30)
+            logger.info(
+                "[SCRAPER] RSMSubAll GET → final URL: %s  status: %d  size: %d bytes",
                 resp.url, resp.status_code, len(resp.content)
             )
 
             if resp.url.lower().endswith("login.jsp"):
                 logger.warning(
-                    "Y%dS%d — redirected to login.jsp when fetching RSMSubAll. "
-                    "Session was not accepted by the portal.",
+                    "[SCRAPER] Y%dS%d — redirected to login.jsp. "
+                    "Session cookie not being accepted by the portal.",
                     study_year, sem_digit,
                 )
+                # Log what cookies the portal returned in this response
+                for h, v in resp.headers.items():
+                    if h.lower() == "set-cookie":
+                        logger.info("[SCRAPER] Portal Set-Cookie on redirect: <len=%d>", len(v))
                 return []
 
             soup   = BeautifulSoup(resp.text, "lxml")
@@ -279,7 +284,8 @@ class SemesterScraper:
             if not select:
                 snippet = resp.text[:500].replace("\n", " ")
                 logger.warning(
-                    "Y%dS%d — subjectcode1 dropdown not found. Page snippet: %s",
+                    "[SCRAPER] Y%dS%d — subjectcode1 dropdown not found. "
+                    "Page snippet: %s",
                     study_year, sem_digit, snippet
                 )
                 return []
@@ -292,7 +298,7 @@ class SemesterScraper:
                     options.append({"label": label, "value": val})
 
             logger.info(
-                "Y%dS%d — found %d section(s): %s",
+                "[SCRAPER] Y%dS%d — found %d section(s): %s",
                 study_year, sem_digit, len(options),
                 [o["label"] for o in options]
             )
@@ -300,7 +306,7 @@ class SemesterScraper:
 
         except Exception as exc:
             logger.warning(
-                "Y%dS%d — error reading section dropdown: %s",
+                "[SCRAPER] Y%dS%d — error reading section dropdown: %s",
                 study_year, sem_digit, exc, exc_info=True
             )
             return []
@@ -317,23 +323,23 @@ class SemesterScraper:
         payload = {
             "coursecode":   _COURSE_CODE,
             "branchcode":   _BRANCH_CODE,
-            "cyear":        str(study_year),   # directly the study year (1–4)
-            "semester":     str(sem_digit),    # 1 or 2
+            "cyear":        str(study_year),
+            "semester":     str(sem_digit),
             "subjectcode1": section_value,
             "excel":        "YES",
             "next":         "submit",
         }
-        logger.debug("POST %s  payload=%s", url, payload)
+        logger.debug("[SCRAPER] POST %s  payload=%s", url, payload)
 
         try:
             resp = session.post(url, data=payload, timeout=60)
         except requests.RequestException as exc:
-            logger.warning("Y%dS%d — POST failed: %s", study_year, sem_digit, exc)
+            logger.warning("[SCRAPER] Y%dS%d — POST failed: %s", study_year, sem_digit, exc)
             return None
 
         if resp.status_code != 200:
             logger.warning(
-                "Y%dS%d — HTTP %d from portal", study_year, sem_digit, resp.status_code
+                "[SCRAPER] Y%dS%d — HTTP %d from portal", study_year, sem_digit, resp.status_code
             )
             return None
 
@@ -345,12 +351,12 @@ class SemesterScraper:
 
             if self.auth._is_login_page(resp, subsite_base):
                 logger.warning(
-                    "Y%dS%d sec %s — session expired mid-run",
+                    "[SCRAPER] Y%dS%d sec %s — session expired mid-run",
                     study_year, sem_digit, section_value
                 )
             else:
                 logger.warning(
-                    "Y%dS%d sec %s — portal returned HTML instead of Excel "
+                    "[SCRAPER] Y%dS%d sec %s — portal returned HTML instead of Excel "
                     "(marks may not be uploaded yet)",
                     study_year, sem_digit, section_value,
                 )
@@ -358,7 +364,7 @@ class SemesterScraper:
 
         if len(resp.content) < 512:
             logger.warning(
-                "Y%dS%d sec %s — response only %d bytes, likely empty",
+                "[SCRAPER] Y%dS%d sec %s — response only %d bytes, likely empty",
                 study_year, sem_digit, section_value, len(resp.content)
             )
             return None
@@ -374,10 +380,7 @@ class SemesterScraper:
     ) -> list[dict]:
         """
         Parse Excel binary into list of dicts.
-        Prepends:
-          - 'Semester' : human-readable label e.g. "Year 3 Sem 1"
-          - 'Overall Sem': overall number 1–8  e.g. 5
-          - 'Section'  : section label from dropdown
+        Prepends Semester (human label), Overall Sem (1-8), Section.
         """
         for engine in ("openpyxl", "xlrd"):
             try:
@@ -392,14 +395,14 @@ class SemesterScraper:
                 continue
         else:
             logger.warning(
-                "Y%dS%d sec %s — could not parse Excel with any engine",
+                "[SCRAPER] Y%dS%d sec %s — could not parse Excel with any engine",
                 study_year, sem_digit, section_label
             )
             return []
 
         if df.empty:
             logger.warning(
-                "Y%dS%d sec %s — Excel has no rows",
+                "[SCRAPER] Y%dS%d sec %s — Excel has no rows",
                 study_year, sem_digit, section_label
             )
             return []
@@ -408,12 +411,11 @@ class SemesterScraper:
         df.dropna(how="all", inplace=True)
         df.fillna("", inplace=True)
 
-        overall = overall_semester_number(study_year, sem_digit)
+        overall   = overall_semester_number(study_year, sem_digit)
         sem_label = f"Year {study_year} Sem {sem_digit}"
 
-        # Insert identifying columns at front
-        df.insert(0, "Section",      section_label)
-        df.insert(0, "Overall Sem",  overall)
-        df.insert(0, "Semester",     sem_label)
+        df.insert(0, "Section",     section_label)
+        df.insert(0, "Overall Sem", overall)
+        df.insert(0, "Semester",    sem_label)
 
         return df.to_dict(orient="records")

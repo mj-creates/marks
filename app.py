@@ -9,6 +9,7 @@ Run with:
 Flow:
     Page 1 — Login: username, password, batch year, study year (1-4), sem digit (1 or 2)
              → logs into that specific sub-site directly
+             → session object cached in st.session_state to prevent double-login on rerun
     Page 2 — Dashboard: shows selection, generate report → download Excel
 """
 
@@ -23,7 +24,7 @@ from auth import PortalAuth, AuthError
 from scraper import SemesterScraper
 from exporter import export_to_excel
 
-# ── Logging ────────────────────────────────────────────────────────────────
+# Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
@@ -32,17 +33,17 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# ── Page config ────────────────────────────────────────────────────────────
+# Page config
 st.set_page_config(
     page_title="Faculty Marks Portal",
     page_icon="🎓",
     layout="centered",
 )
 
-# ── Batch years — fixed to deployed batches on the portal ─────────────────
+# Batch years — fixed to deployed batches on the portal
 BATCH_YEARS = [2024, 2023, 2022, 2021, 2020]
 
-# ── Session state defaults ─────────────────────────────────────────────────
+# Session state defaults
 for _key, _default in [
     ("logged_in",          False),
     ("username",           ""),
@@ -50,14 +51,13 @@ for _key, _default in [
     ("batch_year",         None),
     ("study_year",         None),
     ("sem_digit",          None),
+    ("portal_auth",        None),   # cached PortalAuth instance — avoids re-login on rerun
     ("report_bytes",       None),
     ("report_name",        None),
 ]:
     if _key not in st.session_state:
         st.session_state[_key] = _default
 
-
-# ── Helper ─────────────────────────────────────────────────────────────────
 
 def _read_file_bytes(path):
     with open(path, "rb") as fh:
@@ -133,7 +133,6 @@ def show_login_page():
                 st.error("Please enter both username and password.")
                 return
 
-            # Compute the subsite this login targets, e.g. a20221
             from url_mapper import build_subsite_code
             code = build_subsite_code(batch_year, study_year, sem_digit)
             with st.spinner(
@@ -142,18 +141,20 @@ def show_login_page():
             ):
                 try:
                     auth = PortalAuth(username=username, password=password)
+                    # Login once — cache the auth object so Generate Report
+                    # reuses it without triggering a second login
                     auth.login(
                         admission_year=batch_year,
                         study_year=study_year,
                         sem_digit=sem_digit,
                     )
-                    # Success — store in session
-                    st.session_state["logged_in"]  = True
-                    st.session_state["username"]   = username
-                    st.session_state["password"]   = password
-                    st.session_state["batch_year"] = batch_year
-                    st.session_state["study_year"] = study_year
-                    st.session_state["sem_digit"]  = sem_digit
+                    st.session_state["logged_in"]    = True
+                    st.session_state["username"]     = username
+                    st.session_state["password"]     = password
+                    st.session_state["batch_year"]   = batch_year
+                    st.session_state["study_year"]   = study_year
+                    st.session_state["sem_digit"]    = sem_digit
+                    st.session_state["portal_auth"]  = auth   # cache for dashboard
                     st.rerun()
 
                 except AuthError as exc:
@@ -183,7 +184,7 @@ def show_main_page():
     code        = build_subsite_code(batch_year, study_year, sem_digit)
     overall_sem = overall_semester_number(study_year, sem_digit)
 
-    # ── Top bar ────────────────────────────────────────────────────────
+    # Top bar
     col_title, col_logout = st.columns([5, 1])
     with col_title:
         st.title("🎓 Faculty Marks Portal")
@@ -199,7 +200,7 @@ def show_main_page():
         if st.button("Logout", use_container_width=True):
             for k in ["logged_in", "username", "password",
                       "batch_year", "study_year", "sem_digit",
-                      "report_bytes", "report_name"]:
+                      "portal_auth", "report_bytes", "report_name"]:
                 st.session_state[k] = False if k == "logged_in" else None
             st.rerun()
 
@@ -213,7 +214,7 @@ def show_main_page():
 
     st.divider()
 
-    # ── Generate ───────────────────────────────────────────────────────
+    # Generate
     st.subheader("Generate Report")
 
     if st.button("📊 Generate Report", type="primary", use_container_width=True):
@@ -225,10 +226,18 @@ def show_main_page():
         no_data      = False
 
         try:
-            auth    = PortalAuth(
-                username=st.session_state["username"],
-                password=st.session_state["password"],
-            )
+            # Reuse the cached PortalAuth from login — do NOT create a new one.
+            # Creating a new PortalAuth and calling scrape_all_sections would
+            # trigger a second login(). Instead we pass the cached auth object
+            # which already has all config set from the login page.
+            auth = st.session_state.get("portal_auth")
+            if auth is None:
+                # Fallback: recreate from stored credentials (e.g. after page refresh)
+                auth = PortalAuth(
+                    username=st.session_state["username"],
+                    password=st.session_state["password"],
+                )
+
             scraper = SemesterScraper(auth)
 
             status_text.info(
@@ -295,7 +304,7 @@ def show_main_page():
                 "for this batch, study year, and semester."
             )
 
-    # ── Download ───────────────────────────────────────────────────────
+    # Download
     if st.session_state.get("report_bytes"):
         st.divider()
         st.download_button(
