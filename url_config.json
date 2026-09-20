@@ -1,4 +1,4 @@
 {
-  "_comment": "Optional URL overrides. Key format: '{admission_year}_{semester}'. If a key matches, that URL is used instead of the auto-generated one.",
+  "_comment": "Optional URL overrides. Key format: '{admission_year}_y{study_year}s{sem_digit}'. Example: '2020_y3s1' overrides the Year 3 Sem 1 URL for the 2020 batch.",
   "overrides": {}
 }

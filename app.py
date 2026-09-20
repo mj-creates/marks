@@ -7,14 +7,13 @@ Run with:
     streamlit run app.py
 
 Flow:
-    Page 1 — Login: faculty enters username, password, batch year, semester
-             → logs into that specific batch's portal sub-site
-    Page 2 — Dashboard: shows selected batch+semester, generate report → download
+    Page 1 — Login: username, password, batch year, study year (1-4), sem digit (1 or 2)
+             → logs into that specific sub-site directly
+    Page 2 — Dashboard: shows selection, generate report → download Excel
 """
 
 import logging
 import os
-from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
@@ -31,7 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-load_dotenv()  # no-op if .env absent
+load_dotenv()
 
 # ── Page config ────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -45,19 +44,20 @@ BATCH_YEARS = [2024, 2023, 2022, 2021, 2020]
 
 # ── Session state defaults ─────────────────────────────────────────────────
 for _key, _default in [
-    ("logged_in",        False),
-    ("username",         ""),
-    ("password",         ""),
-    ("batch_year",       None),
-    ("semester",         None),
-    ("report_bytes",     None),
-    ("report_name",      None),
+    ("logged_in",          False),
+    ("username",           ""),
+    ("password",           ""),
+    ("batch_year",         None),
+    ("study_year",         None),
+    ("sem_digit",          None),
+    ("report_bytes",       None),
+    ("report_name",        None),
 ]:
     if _key not in st.session_state:
         st.session_state[_key] = _default
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
+# ── Helper ─────────────────────────────────────────────────────────────────
 
 def _read_file_bytes(path):
     with open(path, "rb") as fh:
@@ -96,7 +96,8 @@ def show_login_page():
                 placeholder="Enter your portal password",
             )
 
-            col_year, col_sem = st.columns(2)
+            col_year, col_sy, col_sd = st.columns(3)
+
             with col_year:
                 batch_year = st.selectbox(
                     "Batch Year",
@@ -104,12 +105,23 @@ def show_login_page():
                     index=0,
                     help="Admission year of the batch e.g. 2020",
                 )
-            with col_sem:
-                semester = st.selectbox(
-                    "Semester",
-                    options=list(range(1, 9)),
+
+            with col_sy:
+                study_year = st.selectbox(
+                    "Study Year",
+                    options=[1, 2, 3, 4],
                     index=0,
-                    format_func=lambda s: f"Semester {s}",
+                    format_func=lambda y: f"Year {y}",
+                    help="Which year of the B.Tech (1–4)",
+                )
+
+            with col_sd:
+                sem_digit = st.selectbox(
+                    "Semester",
+                    options=[1, 2],
+                    index=0,
+                    format_func=lambda s: f"Sem {s}",
+                    help="1st or 2nd semester of that study year",
                 )
 
             submit = st.form_submit_button(
@@ -121,19 +133,27 @@ def show_login_page():
                 st.error("Please enter both username and password.")
                 return
 
+            # Compute the subsite this login targets, e.g. a20221
+            from url_mapper import build_subsite_code
+            code = build_subsite_code(batch_year, study_year, sem_digit)
             with st.spinner(
-                f"Logging in to {batch_year} batch · Semester {semester}…"
+                f"Logging in to portal sub-site a{code} "
+                f"({batch_year} batch · Year {study_year} · Sem {sem_digit})…"
             ):
                 try:
                     auth = PortalAuth(username=username, password=password)
-                    auth.login(admission_year=batch_year, semester=semester)
-
-                    # Credentials accepted — store in session
+                    auth.login(
+                        admission_year=batch_year,
+                        study_year=study_year,
+                        sem_digit=sem_digit,
+                    )
+                    # Success — store in session
                     st.session_state["logged_in"]  = True
                     st.session_state["username"]   = username
                     st.session_state["password"]   = password
                     st.session_state["batch_year"] = batch_year
-                    st.session_state["semester"]   = semester
+                    st.session_state["study_year"] = study_year
+                    st.session_state["sem_digit"]  = sem_digit
                     st.rerun()
 
                 except AuthError as exc:
@@ -142,8 +162,7 @@ def show_login_page():
                     st.error(f"❌ Could not connect to portal: {exc}")
 
         st.markdown(
-            "<p style='text-align:center; color:gray; font-size:12px;"
-            " margin-top:20px;'>"
+            "<p style='text-align:center; color:gray; font-size:12px; margin-top:20px;'>"
             "Credentials are used only to access the portal on your behalf "
             "and are never stored or transmitted elsewhere."
             "</p>",
@@ -156,8 +175,13 @@ def show_login_page():
 # ══════════════════════════════════════════════════════════════════════════
 
 def show_main_page():
-    selected_year     = st.session_state["batch_year"]
-    selected_semester = st.session_state["semester"]
+    batch_year = st.session_state["batch_year"]
+    study_year = st.session_state["study_year"]
+    sem_digit  = st.session_state["sem_digit"]
+
+    from url_mapper import build_subsite_code, overall_semester_number
+    code        = build_subsite_code(batch_year, study_year, sem_digit)
+    overall_sem = overall_semester_number(study_year, sem_digit)
 
     # ── Top bar ────────────────────────────────────────────────────────
     col_title, col_logout = st.columns([5, 1])
@@ -165,24 +189,26 @@ def show_main_page():
         st.title("🎓 Faculty Marks Portal")
         st.caption(
             f"Logged in as **{st.session_state['username']}** · "
-            f"Batch **{selected_year}** · Semester **{selected_semester}** · "
+            f"Batch **{batch_year}** · "
+            f"Year {study_year} Sem {sem_digit} "
+            f"(Overall Sem {overall_sem}, sub-site a{code}) · "
             "VIMS Section Marks Dashboard"
         )
     with col_logout:
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("Logout", use_container_width=True):
             for k in ["logged_in", "username", "password",
-                      "batch_year", "semester",
+                      "batch_year", "study_year", "sem_digit",
                       "report_bytes", "report_name"]:
                 st.session_state[k] = False if k == "logged_in" else None
             st.rerun()
 
     st.divider()
 
-    # ── Summary card ───────────────────────────────────────────────────
     st.info(
-        f"📋 Generating master marks sheet for **{selected_year} batch · "
-        f"Semester {selected_semester}** — all sections assigned to you."
+        f"📋 Generating master marks sheet for **{batch_year} batch · "
+        f"Year {study_year} · Semester {sem_digit}** "
+        f"(Overall Sem {overall_sem}) — all sections assigned to you."
     )
 
     st.divider()
@@ -196,7 +222,7 @@ def show_main_page():
 
         progress_bar = st.progress(0, text="Starting…")
         status_text  = st.empty()
-        no_sections  = False
+        no_data      = False
 
         try:
             auth    = PortalAuth(
@@ -205,11 +231,8 @@ def show_main_page():
             )
             scraper = SemesterScraper(auth)
 
-            # Single login — scrape_all_sections discovers sections internally
-            # and returns all records in one shot (no separate get_available_sections call)
             status_text.info(
-                f"🔍 Logging in and fetching sections for "
-                f"{selected_year} · Semester {selected_semester}…"
+                f"🔍 Logging in to a{code} and fetching sections…"
             )
 
             def on_progress(idx, total):
@@ -220,8 +243,9 @@ def show_main_page():
                 status_text.info(f"⏳ Processing section {idx} of {total}…")
 
             all_records = scraper.scrape_all_sections(
-                admission_year=selected_year,
-                semester=selected_semester,
+                admission_year=batch_year,
+                study_year=study_year,
+                sem_digit=sem_digit,
                 progress_callback=on_progress,
             )
 
@@ -231,14 +255,14 @@ def show_main_page():
                 secs_with_data = len(
                     {r.get("Section") for r in all_records if r.get("Section")}
                 )
-                st.info(
-                    f"Found **{secs_with_data}** section(s) with data."
-                )
+                st.info(f"Found **{secs_with_data}** section(s) with data.")
                 status_text.info("💾 Building Excel file…")
+
                 output_path = export_to_excel(
                     records=all_records,
-                    admission_year=selected_year,
-                    semester=selected_semester,
+                    admission_year=batch_year,
+                    study_year=study_year,
+                    sem_digit=sem_digit,
                     output_dir="output",
                 )
                 st.session_state["report_bytes"] = _read_file_bytes(output_path)
@@ -250,26 +274,25 @@ def show_main_page():
                 )
             else:
                 status_text.empty()
-                no_sections = True
+                no_data = True
 
         except AuthError as exc:
             status_text.empty()
             progress_bar.empty()
-            st.error(
-                f"❌ Session expired — please logout and login again. ({exc})"
-            )
+            st.error(f"❌ Session expired — please logout and login again. ({exc})")
         except Exception as exc:
             status_text.empty()
             progress_bar.empty()
             st.error(f"❌ Unexpected error: {exc}")
             logger.exception("Error during report generation")
 
-        if no_sections:
+        if no_data:
             status_text.empty()
             progress_bar.empty()
             st.warning(
-                "⚠️ No sections found for this batch and semester. "
-                "Check that marks have been uploaded on the portal."
+                "⚠️ No data returned for any section. "
+                "Check that marks have been uploaded on the portal "
+                "for this batch, study year, and semester."
             )
 
     # ── Download ───────────────────────────────────────────────────────
@@ -279,16 +302,12 @@ def show_main_page():
             label="⬇️ Download Master Excel",
             data=st.session_state["report_bytes"],
             file_name=st.session_state["report_name"],
-            mime=(
-                "application/vnd.openxmlformats-officedocument"
-                ".spreadsheetml.sheet"
-            ),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
             use_container_width=True,
         )
         st.caption(f"File: `{st.session_state['report_name']}`")
 
-    # ── Footer ─────────────────────────────────────────────────────────
     st.divider()
     st.caption(
         "Runs locally only · Read-only access · "

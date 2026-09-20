@@ -1,24 +1,25 @@
 """
 exporter.py — Excel Aggregation Module
 ========================================
-Combines marks records from all sections of a single semester into one
+Combines marks records from all sections of a given semester into one
 master Excel file.
 
 Layout (single sheet):
     One row per student-subject entry.
-    A "Section" column identifies which section each row belongs to.
-    Sorted by Section → then by whatever roll/name columns exist.
+    Columns: Semester | Overall Sem | Section | <portal columns...>
+    Sorted by Section → roll/name columns.
 
 Output file name:
-    marks_{admission_year}_sem{semester}_{YYYYMMDD_HHMMSS}.xlsx
+    marks_{admission_year}_y{study_year}s{sem_digit}_{YYYYMMDD_HHMMSS}.xlsx
 
 Usage:
     from exporter import export_to_excel
 
     path = export_to_excel(
-        records=all_records,        # list of dicts from scraper
+        records=all_records,
         admission_year=2020,
-        semester=1,
+        study_year=3,
+        sem_digit=1,
         output_dir="output",
     )
     print(f"Saved to {path}")
@@ -35,23 +36,17 @@ from openpyxl.utils import get_column_letter
 
 logger = logging.getLogger(__name__)
 
-# Header fill colour — light blue
-_HEADER_FILL = PatternFill(
-    start_color="BDD7E7", end_color="BDD7E7", fill_type="solid"
-)
+_HEADER_FILL = PatternFill(start_color="BDD7E7", end_color="BDD7E7", fill_type="solid")
 _HEADER_FONT = Font(bold=True)
-
-# Annotation row fill — light yellow for "no data" rows
-_ANNOT_FILL = PatternFill(
-    start_color="FFF2CC", end_color="FFF2CC", fill_type="solid"
-)
-_ANNOT_FONT = Font(italic=True, color="7F7F7F")
+_ANNOT_FILL  = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+_ANNOT_FONT  = Font(italic=True, color="7F7F7F")
 
 
 def export_to_excel(
     records: list[dict],
     admission_year: int,
-    semester: int,
+    study_year: int,
+    sem_digit: int,
     output_dir: str = "output",
 ) -> str:
     """
@@ -60,7 +55,8 @@ def export_to_excel(
     Args:
         records:        Flat list of dicts from SemesterScraper.scrape_all_sections()
         admission_year: 4-digit batch year e.g. 2020
-        semester:       Semester number 1–8
+        study_year:     1–4
+        sem_digit:      1 or 2
         output_dir:     Directory to write the file into
 
     Returns:
@@ -69,18 +65,20 @@ def export_to_excel(
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"marks_{admission_year}_sem{semester}_{timestamp}.xlsx"
-    filepath = os.path.join(output_dir, filename)
+    filename  = f"marks_{admission_year}_y{study_year}s{sem_digit}_{timestamp}.xlsx"
+    filepath  = os.path.join(output_dir, filename)
 
     # ── Build DataFrame ────────────────────────────────────────────────
     if records:
         df = pd.DataFrame(records)
-        # Ensure Semester and Section columns come first
-        priority_cols = [c for c in ["Semester", "Section"] if c in df.columns]
+        # Priority columns come first
+        priority_cols = [
+            c for c in ["Semester", "Overall Sem", "Section"] if c in df.columns
+        ]
         other_cols = [c for c in df.columns if c not in priority_cols]
         df = df[priority_cols + other_cols]
 
-        # Sort by Section first, then any roll/name columns if present
+        # Sort by Section, then roll/name columns
         sort_cols = priority_cols + [
             c for c in df.columns
             if any(k in c.lower() for k in ["roll", "name", "rno", "regno"])
@@ -88,20 +86,22 @@ def export_to_excel(
         if sort_cols:
             df.sort_values(by=sort_cols, inplace=True, ignore_index=True)
     else:
-        df = pd.DataFrame(columns=["Semester", "Section", "Note"])
+        df = pd.DataFrame(columns=["Semester", "Overall Sem", "Section", "Note"])
 
-    # ── Write via pandas ───────────────────────────────────────────────
+    # ── Write via pandas + format inside ExcelWriter context ───────────
     with pd.ExcelWriter(filepath, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="Marks", index=False)
         ws = writer.sheets["Marks"]
 
-        # Apply formatting inside the writer context (single write)
         _format_header(ws)
         _autofit_columns(ws)
 
-        # Add "no data" annotation when records is empty
         if not records:
-            ws.cell(row=2, column=1, value=f"Semester {semester} — no data available")
+            note = (
+                f"Year {study_year} Sem {sem_digit} "
+                f"(batch {admission_year}) — no data available"
+            )
+            ws.cell(row=2, column=1, value=note)
             cell = ws.cell(row=2, column=1)
             cell.font = _ANNOT_FONT
             cell.fill = _ANNOT_FILL

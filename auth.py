@@ -73,13 +73,14 @@ class PortalAuth:
     # Public API
     # ------------------------------------------------------------------
 
-    def login(self, admission_year: int, semester: int) -> requests.Session:
+    def login(self, admission_year: int, study_year: int, sem_digit: int) -> requests.Session:
         """
         Create a new authenticated session for the given semester sub-site.
 
         Args:
             admission_year: 4-digit batch admission year, e.g. 2020
-            semester:        Semester number 1–8
+            study_year:     1–4 (which year of the B.Tech)
+            sem_digit:      1 or 2
 
         Returns:
             An authenticated requests.Session
@@ -96,10 +97,11 @@ class PortalAuth:
         session = requests.Session()
         session.verify = self.verify_ssl
 
-        # Build the sub-site base URL, e.g. https://192.168.10.10/a20201
-        subsite_base = self._subsite_base(admission_year, semester)
-
-        # Step 1: GET the login page to collect any hidden tokens / cookies
+        # Build the sub-site base URL using the correct formula
+        from url_mapper import get_subsite_url
+        subsite_base  = get_subsite_url(
+            admission_year, study_year, sem_digit, self.base_host, page=""
+        ).rstrip("/")
         login_page_url = f"{subsite_base}/login.jsp"
         try:
             resp = session.get(login_page_url, timeout=30)
@@ -160,7 +162,7 @@ class PortalAuth:
                 "Check your username and password."
             )
 
-        logger.info("Logged in to sem %d (year %d)", semester, admission_year)
+        logger.info("Logged in to Y%dS%d (batch %d)", study_year, sem_digit, admission_year)
         return session
 
     def ensure_logged_in(
@@ -168,30 +170,32 @@ class PortalAuth:
         session: requests.Session,
         response: requests.Response,
         admission_year: int,
-        semester: int,
+        study_year: int,
+        sem_digit: int,
     ) -> requests.Session:
-        """
-        Check if the response indicates session expiry; if so, re-login once.
-
-        Returns the (possibly refreshed) session.
-        """
-        subsite_base = self._subsite_base(admission_year, semester)
+        """Re-login if session has expired. Returns refreshed session."""
+        from url_mapper import get_subsite_url
+        subsite_base = get_subsite_url(
+            admission_year, study_year, sem_digit, self.base_host, page=""
+        ).rstrip("/")
         if self._is_login_page(response, subsite_base):
             logger.warning(
-                "Session expired for sem %d (year %d) — re-authenticating",
-                semester,
-                admission_year,
+                "Session expired for Y%dS%d (batch %d) — re-authenticating",
+                study_year, sem_digit, admission_year,
             )
-            return self.login(admission_year, semester)
+            return self.login(admission_year, study_year, sem_digit)
         return session
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    def _subsite_base(self, admission_year: int, semester: int) -> str:
-        """Return the sub-site base URL, e.g. https://192.168.10.10/a20201"""
-        return f"https://{self.base_host}/a{admission_year}{semester}"
+    def _subsite_base(self, admission_year: int, study_year: int, sem_digit: int) -> str:
+        """Return the sub-site base URL using the correct formula."""
+        from url_mapper import get_subsite_url
+        return get_subsite_url(
+            admission_year, study_year, sem_digit, self.base_host, page=""
+        ).rstrip("/")
 
     def _is_login_page(self, response: requests.Response, subsite_base: str) -> bool:
         """
