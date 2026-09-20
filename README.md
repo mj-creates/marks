@@ -1,7 +1,7 @@
 # Faculty Marks Portal — Local Dashboard
 
-A local tool for faculty to pull internal + external marks for all 8 semesters
-of a batch from the VIMS portal, and download them as a single Excel file.
+A local tool for faculty to pull internal + external marks for a semester
+from the VIMS portal and download a master Excel file covering all sections.
 
 ---
 
@@ -38,24 +38,24 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4. Configure credentials
+### 4. Configure the portal host
 
-Copy the example env file and fill in your details:
+Copy the example env file:
 
 ```bash
 copy .env.example .env       # Windows
 cp  .env.example .env        # macOS / Linux
 ```
 
-Open `.env` in any text editor and set:
+Open `.env` and set the portal host:
 
 ```
 PORTAL_BASE_HOST=192.168.10.10
-PORTAL_USERNAME=your_faculty_username
-PORTAL_PASSWORD=your_portal_password
 ```
 
-> Your `.env` file is git-ignored and never leaves your machine.
+That is the only required setting. **Do not add your username or password
+to this file** — credentials are entered only through the app's login screen
+and are never written to disk.
 
 ---
 
@@ -71,47 +71,52 @@ Your browser will open automatically at `http://localhost:8501`.
 
 ## How to use
 
-1. **Load Sections** — Select a batch year and click "Load Sections".
-   The app logs in to the portal and reads which sections are assigned to you.
+1. **Login screen** — Enter your faculty username and password, select the
+   batch year, study year (1–4), and semester (1 or 2), then click **Login**.
+   The app logs you in directly to the correct portal sub-site.
 
-2. **Select Section** — Pick the section from the dropdown.
-
-3. **Generate Report** — Click the button. The app will:
-   - Log in to each of the 8 semester sub-sites
-   - Submit the marks form and download the Excel for each semester
-   - Merge all 8 into one master Excel file
+2. **Generate Report** — Click the button. The app will:
+   - Discover all sections assigned to you for that semester
+   - Download marks for each section from the portal
+   - Merge everything into one master Excel file
    - Show a progress bar while working
 
-4. **Download** — Click "Download Master Excel" to save the file.
+3. **Download** — Click **Download Master Excel** to save the file.
 
 Generated files are also saved locally in the `output/` folder.
 
+> Credentials are held only in browser session memory for the duration of
+> your session. They are never written to disk, logged, or transmitted
+> anywhere other than the college portal.
+
 ---
 
-## Adjusting login field names
+## .env settings reference
 
-If your portal uses different form field names for login, update these in `.env`:
-
-```
-PORTAL_LOGIN_PATH=/j_security_check
-PORTAL_LOGIN_USER_FIELD=j_username
-PORTAL_LOGIN_PASS_FIELD=j_password
-```
+| Setting | Required | Default | Description |
+|---------|----------|---------|-------------|
+| `PORTAL_BASE_HOST` | Yes | `192.168.10.10` | Portal IP or hostname |
+| `PORTAL_LOGIN_PATH` | No | `/login.jsp` | Login form POST path |
+| `PORTAL_LOGIN_USER_FIELD` | No | `user` | Username field name |
+| `PORTAL_LOGIN_PASS_FIELD` | No | `pwd` | Password field name |
+| `PORTAL_VERIFY_SSL` | No | `false` | SSL cert verification |
 
 ---
 
 ## URL overrides
 
-If a specific semester's URL is different from the standard pattern
-(`a{year}{sem}/RSMSubAll.jsp`), edit `url_config.json`:
+If a specific semester's URL differs from the standard pattern, edit
+`url_config.json`:
 
 ```json
 {
   "overrides": {
-    "2020_3": "https://192.168.10.10/a20203_v2/RSMSubAll.jsp"
+    "2020_y3s1": "https://192.168.10.10/a20221_v2/RSMSubAll.jsp"
   }
 }
 ```
+
+Key format: `{admission_year}_y{study_year}s{sem_digit}`
 
 ---
 
@@ -119,13 +124,14 @@ If a specific semester's URL is different from the standard pattern
 
 ```
 marks/
-├── app.py            Streamlit UI
+├── app.py            Streamlit UI — only entry point for credentials
 ├── auth.py           Login / session management
 ├── url_mapper.py     URL builder + override loader
 ├── scraper.py        Form submission + Excel downloader + parser
 ├── exporter.py       Merge records → master Excel
 ├── url_config.json   Optional URL overrides
-├── .env.example      Credential template (copy to .env)
+├── debug_scraper.py  Diagnostic script (prompts for credentials interactively)
+├── .env.example      Config template (no credentials)
 ├── requirements.txt  Pinned Python dependencies
 ├── output/           Generated Excel files (git-ignored)
 └── .kiro/specs/      Requirements, design, and task docs
@@ -137,9 +143,9 @@ marks/
 
 | Symptom | Fix |
 |---------|-----|
-| "Login failed" | Check username/password in `.env`; make sure you're on campus network |
-| "No sections found" | Try a different batch year; confirm portal is accessible |
-| "No data found for any semester" | The batch may not have marks uploaded yet for all sems |
+| "Login failed" | Check username/password; make sure you're on the college network |
+| "No sections found" | Confirm the batch year, study year, and semester are correct |
+| "No data returned" | Marks may not be uploaded on the portal yet for that semester |
 | SSL errors | Ensure `PORTAL_VERIFY_SSL=false` in `.env` (self-signed cert) |
 | `xlrd` error on Excel parse | The portal may return `.xlsx`; the app tries both engines automatically |
 
@@ -149,4 +155,4 @@ marks/
 
 - This tool is **read-only** — it never modifies any portal data.
 - It only accesses data you are already authorised to see under your faculty login.
-- Credentials are stored only in your local `.env` file and held in memory during the session.
+- Credentials are never stored on disk or committed to version control.

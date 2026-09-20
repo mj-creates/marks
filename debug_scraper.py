@@ -1,24 +1,38 @@
 """
-debug_scraper.py — Diagnose login issue.
+debug_scraper.py — Diagnose login / session issues.
+
 Run: python debug_scraper.py
+
+Credentials are entered interactively and never stored anywhere.
 """
 
+import getpass
 import os
 import requests
 import urllib3
 from bs4 import BeautifulSoup
-from dotenv import load_dotenv
 
 urllib3.disable_warnings()
-load_dotenv()
 
-USERNAME   = os.getenv("PORTAL_USERNAME") or input("Username: ")
-PASSWORD   = os.getenv("PORTAL_PASSWORD") or input("Password: ")
+# ── Interactive credential prompt — nothing read from .env ────────────────
+print("=== Faculty Marks Portal — Debug Login ===")
+print("Credentials are used only for this diagnostic run and are not saved.\n")
+USERNAME   = input("Username: ")
+PASSWORD   = getpass.getpass("Password (hidden): ")
 BASE_HOST  = os.getenv("PORTAL_BASE_HOST", "192.168.10.10")
-BATCH_YEAR = 2020
-SEMESTER   = 1
 
-BASE_URL = "https://" + BASE_HOST + "/a" + str(BATCH_YEAR) + str(SEMESTER)
+# ── Target sub-site ───────────────────────────────────────────────────────
+# Edit these to target a different batch / study year / semester
+BATCH_YEAR  = 2020
+STUDY_YEAR  = 1     # 1–4
+SEM_DIGIT   = 1     # 1 or 2
+
+from url_mapper import build_subsite_code, get_subsite_url
+
+CODE     = build_subsite_code(BATCH_YEAR, STUDY_YEAR, SEM_DIGIT)
+BASE_URL = "https://" + BASE_HOST + "/a" + CODE
+
+print(f"\nTargeting sub-site: a{CODE}  ({BATCH_YEAR} batch, Year {STUDY_YEAR}, Sem {SEM_DIGIT})")
 
 session = requests.Session()
 session.verify = False
@@ -45,7 +59,7 @@ if form:
 else:
     print("    NO FORM FOUND")
 
-# ── Step 2: Build payload with ALL fields ─────────────────────────────────
+# ── Step 3: Build payload and POST ────────────────────────────────────────
 payload = {}
 if form:
     for inp in form.find_all("input"):
@@ -54,13 +68,13 @@ if form:
         if name:
             payload[name] = val
 
-# Set credentials
 payload["user"] = USERNAME
 payload["pwd"]  = PASSWORD
-# Only send the LOGIN submit button, not Reset
-payload.pop("re", None)
+payload.pop("re", None)   # remove Reset button
 
-print("\n[3] Submitting payload: " + str(payload))
+print("\n[3] Submitting payload (password hidden): " + str(
+    {k: ("***" if k == "pwd" else v) for k, v in payload.items()}
+))
 
 resp2 = session.post(
     BASE_URL + "/login.jsp",
@@ -75,8 +89,8 @@ with open("debug_after_login.html", "w", encoding="utf-8") as f:
     f.write(resp2.text)
 print("    Saved debug_after_login.html")
 
-# Check result
-if "login" in resp2.url.lower():
+# ── Step 4: Check result ──────────────────────────────────────────────────
+if resp2.url.lower().endswith("login.jsp"):
     print("\n    ❌ Still on login page — credentials rejected or missing field")
     soup2 = BeautifulSoup(resp2.text, "lxml")
     for tag in soup2.find_all(["p", "span", "div", "td", "font"]):
@@ -86,10 +100,7 @@ if "login" in resp2.url.lower():
 else:
     print("\n    ✅ Login succeeded — landed on: " + resp2.url)
 
-    from url_mapper import get_semester_urls
-    sem_urls = get_semester_urls(BATCH_YEAR, BASE_HOST)
-    marks_url = sem_urls[SEMESTER]
-
+    marks_url = get_subsite_url(BATCH_YEAR, STUDY_YEAR, SEM_DIGIT, BASE_HOST)
     print("\n[4] GET " + marks_url)
     resp3 = session.get(marks_url, timeout=30)
     print("    Status: " + str(resp3.status_code) + "  Final URL: " + resp3.url)

@@ -207,14 +207,10 @@ marks_{admission_year}_{section}_{YYYYMMDD_HHMMSS}.xlsx
 | Key | File | Description |
 |-----|------|-------------|
 | `PORTAL_BASE_HOST` | `.env` | e.g. `192.168.10.10` |
-| `PORTAL_USERNAME` | `.env` | Faculty login username |
-| `PORTAL_PASSWORD` | `.env` | Faculty login password |
-| `PORTAL_LOGIN_PATH` | `.env` | Login POST path (default `/j_security_check`) |
-| `PORTAL_LOGIN_USER_FIELD` | `.env` | Form field name for username (default `j_username`) |
-| `PORTAL_LOGIN_PASS_FIELD` | `.env` | Form field name for password (default `j_password`) |
+| `PORTAL_LOGIN_PATH` | `.env` | Login POST path (default `/login.jsp`) |
+| `PORTAL_LOGIN_USER_FIELD` | `.env` | Form field name for username (default `user`) |
+| `PORTAL_LOGIN_PASS_FIELD` | `.env` | Form field name for password (default `pwd`) |
 | `PORTAL_VERIFY_SSL` | `.env` | `true`/`false` (default `false` for internal IP) |
-| `PORTAL_SECTIONS` | `.env` | Comma-separated list (default `A,B,C,D`) |
-| `PORTAL_BATCH_START_YEAR` | `.env` | Earliest batch year in dropdown (default `2018`) |
 
 ---
 

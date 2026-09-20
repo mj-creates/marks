@@ -49,8 +49,11 @@ class PortalAuth:
         verify_ssl: bool | None = None,
     ):
         self.base_host = base_host or os.getenv("PORTAL_BASE_HOST", "192.168.10.10")
-        self.username = username or os.getenv("PORTAL_USERNAME", "")
-        self.password = password or os.getenv("PORTAL_PASSWORD", "")
+
+        # Credentials must be supplied by the caller (app.py login form).
+        # They are never read from .env — no stored passwords on disk.
+        self.username = username or ""
+        self.password = password or ""
 
         # Login form field names — default to common JSP pattern
         self.user_field = user_field or os.getenv("PORTAL_LOGIN_USER_FIELD", "user")
@@ -90,8 +93,8 @@ class PortalAuth:
         """
         if not self.username or not self.password:
             raise AuthError(
-                "Credentials not set. Populate PORTAL_USERNAME and "
-                "PORTAL_PASSWORD in your .env file."
+                "Credentials not set. Enter your username and password "
+                "on the app login screen."
             )
 
         session = requests.Session()
