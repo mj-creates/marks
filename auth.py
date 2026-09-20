@@ -153,12 +153,12 @@ class PortalAuth:
         try:
             resp = session.post(login_post_url, data=payload, timeout=30, allow_redirects=True)
         except requests.RequestException as exc:
-            raise AuthError(f"Login POST failed for sem {semester}: {exc}") from exc
+            raise AuthError(f"Login POST failed for Y{study_year}S{sem_digit}: {exc}") from exc
 
         # Step 3: Verify we are actually logged in
         if self._is_login_page(resp, subsite_base):
             raise AuthError(
-                f"Login rejected for sem {semester} (year {admission_year}). "
+                f"Login rejected for Y{study_year}S{sem_digit} (batch {admission_year}). "
                 "Check your username and password."
             )
 
