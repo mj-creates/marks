@@ -1,7 +1,19 @@
 import logging, os, urllib3, requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger(__name__)
+
+# Failure phrases that indicate the portal rejected the login.
+# Matched against BeautifulSoup get_text() output (tag-stripped),
+# NOT raw HTML — portal wraps these words in separate tags so raw
+# substring search never matches.
+_FAILURE_PHRASES = [
+    'wrong  password', 'wrong password',
+    'invalid user', 'invalid login',
+    'login failed', 'incorrect password',
+    'authentication failed',
+]
 
 class AuthError(Exception):
     pass
@@ -17,16 +29,21 @@ class PortalAuth:
         if verify_ssl is not None:
             self.verify_ssl = verify_ssl
         else:
-            self.verify_ssl = os.getenv('PORTAL_VERIFY_SSL','false').strip().lower() == 'true'
+            self.verify_ssl = os.getenv('PORTAL_VERIFY_SSL', 'false').strip().lower() == 'true'
         if not self.verify_ssl:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     def login(self, admission_year, study_year, sem_digit):
         """
-        POST credentials to login.jsp and return an authenticated session.
-        POST endpoint is read from the form action attribute — never hardcoded.
-        Payload: exactly {user_field: username, pass_field: password, log: LOGIN}
-        Success check: HTTP 200 AND body does not contain login form AND no failure text.
+        GET login.jsp, read the form action, POST credentials, verify result.
+
+        POST endpoint:  read from <form action=...> — never hardcoded.
+        Payload:        {user_field: username, pass_field: password, log: LOGIN}
+        Success checks (in order):
+          1. HTTP status must be 200          (catches 404 j_security_check etc.)
+          2. No failure phrases in stripped text  (catches "Wrong Password" in tags)
+          3. Login form not still present in body (catches silent rejection)
+        Response body is saved to last_login_response.html for inspection.
         """
         if not self.username or not self.password:
             raise AuthError('Credentials not set. Enter on the app login screen.')
@@ -39,7 +56,7 @@ class PortalAuth:
                                          self.base_host, page='').rstrip('/')
         login_page_url = f'{subsite_base}/login.jsp'
 
-        # Step 1: GET login page to get JSESSIONID and read the form action
+        # Step 1: GET login page — picks up initial JSESSIONID cookie
         try:
             resp = session.get(login_page_url, timeout=30)
             resp.raise_for_status()
@@ -49,39 +66,32 @@ class PortalAuth:
         logger.debug('[AUTH] GET login page OK  cookies: %s',
                      {c.name: len(c.value) for c in session.cookies})
 
-        # Step 2: Read form action from the page (do NOT hardcode the endpoint)
-        from bs4 import BeautifulSoup
+        # Step 2: Read POST URL from form action — never hardcode
         soup = BeautifulSoup(resp.text, 'lxml')
         form = soup.find('form')
 
-        # Derive POST URL from form action attribute
         if form and form.get('action'):
             action = form['action'].strip()
             if action.startswith('http'):
                 login_post_url = action
             elif action.startswith('/'):
                 from urllib.parse import urlparse
-                parsed = urlparse(subsite_base)
-                login_post_url = f'{parsed.scheme}://{parsed.netloc}{action}'
+                p = urlparse(subsite_base)
+                login_post_url = f'{p.scheme}://{p.netloc}{action}'
             else:
-                # Relative path — resolve against subsite base
                 login_post_url = f'{subsite_base}/{action.lstrip("/")}'
         else:
-            # Fallback: POST to the same login.jsp URL
-            login_post_url = login_page_url
+            login_post_url = login_page_url   # fallback: same URL
 
         logger.info('[AUTH] Form action resolved to: %s', login_post_url)
 
-        # Step 3: Build payload — confirmed fields: user, pwd, log=LOGIN
-        # Use exactly the three fields seen in working browser payload.
-        # 'log' is the LOGIN submit button value — must be included.
+        # Step 3: Build payload — exactly: user, pwd, log=LOGIN
         payload = {
             self.user_field: self.username,
             self.pass_field: self.password,
             'log': 'LOGIN',
         }
-
-        logger.debug('[AUTH] POST %s  fields: %s', login_post_url,
+        logger.debug('[AUTH] POST %s  extra fields: %s', login_post_url,
                      [k for k in payload if k not in (self.user_field, self.pass_field)])
 
         # Step 4: POST credentials
@@ -90,7 +100,7 @@ class PortalAuth:
         except requests.RequestException as exc:
             raise AuthError(f'Login POST failed for Y{study_year}S{sem_digit}: {exc}') from exc
 
-        # Deep diagnostics — always log at INFO so they appear in terminal
+        # Diagnostics — always at INFO level
         if resp.history:
             logger.info('[AUTH] Login POST - %d redirect(s):', len(resp.history))
             for i, r in enumerate(resp.history):
@@ -99,7 +109,9 @@ class PortalAuth:
         else:
             logger.info('[AUTH] Login POST - no redirects (direct response)')
 
-        logger.info('[AUTH] Final URL: %s  HTTP %d', resp.url, resp.status_code)
+        logger.info('[AUTH] Final URL: %s  HTTP %d  Content-Length: %s',
+                    resp.url, resp.status_code,
+                    resp.headers.get('Content-Length', 'unknown'))
 
         logger.info('[AUTH] Response headers from login POST:')
         for h, v in resp.headers.items():
@@ -112,41 +124,54 @@ class PortalAuth:
         if session.cookies:
             for cookie in session.cookies:
                 logger.info('[AUTH]   name=%-20s  domain=%-25s  path=%-8s  value_len=%d',
-                             cookie.name, cookie.domain or '(none)', cookie.path, len(cookie.value))
+                             cookie.name, cookie.domain or '(none)',
+                             cookie.path, len(cookie.value))
         else:
             logger.warning('[AUTH]   WARNING: NO COOKIES in session jar after login POST')
 
-        # Step 5: Strict success check — all three conditions must pass
-        # FIX: HTTP status is checked FIRST. A 404 or any non-200 is an
-        # immediate failure regardless of URL or body content.
+        # Save response body for inspection — overwritten each run, gitignored
+        try:
+            with open('last_login_response.html', 'w', encoding='utf-8', errors='replace') as fh:
+                fh.write(resp.text)
+            logger.info('[AUTH] Response body saved to last_login_response.html')
+        except OSError as exc:
+            logger.warning('[AUTH] Could not save response body: %s', exc)
+
+        # Step 5: Strict success checks
+        # Check 1: HTTP status — 404/non-200 is always a hard failure
         if resp.status_code != 200:
             raise AuthError(
                 f'[AUTH] FAILED: HTTP {resp.status_code} on POST to {login_post_url} '
                 f'for Y{study_year}S{sem_digit}. Wrong endpoint or server error.'
             )
 
-        body = resp.text.lower()
+        # Parse response with BeautifulSoup to get tag-stripped text
+        # IMPORTANT: failure phrases like "Wrong Password" appear inside table
+        # cells/spans in separate tags — raw HTML substring search misses them.
+        # get_text() strips all markup so "Wrong  Password" becomes findable.
+        resp_soup      = BeautifulSoup(resp.text, 'lxml')
+        stripped_text  = resp_soup.get_text(separator=' ').lower()
 
-        # Check for known failure messages in the response body
-        failure_phrases = ['wrong  password', 'wrong password', 'invalid user',
-                           'invalid login', 'login failed', 'incorrect password']
-        for phrase in failure_phrases:
-            if phrase in body:
+        # Check 2: failure phrases in stripped text
+        for phrase in _FAILURE_PHRASES:
+            if phrase in stripped_text:
                 raise AuthError(
-                    f'[AUTH] FAILED: portal returned failure message '
-                    f'"{phrase}" for Y{study_year}S{sem_digit}. Check credentials.'
+                    f'[AUTH] FAILED: portal returned "{phrase}" '
+                    f'for Y{study_year}S{sem_digit}. Check credentials.'
                 )
 
-        # Check if login form is still present (means login was rejected silently)
+        # Check 3: login form still present in raw HTML
+        # (use raw HTML here — we're checking for HTML attributes, not visible text)
+        raw_body = resp.text.lower()
         u = self.user_field.lower()
         form_still_present = (
-            (('name="' + u + '"') in body or ("name='" + u + "'") in body)
-            and '<form' in body
+            (('name="' + u + '"') in raw_body or ("name='" + u + "'") in raw_body)
+            and '<form' in raw_body
         )
         if form_still_present:
             raise AuthError(
-                f'[AUTH] FAILED: login form still present in response body '
-                f'for Y{study_year}S{sem_digit}. Credentials rejected without error message.'
+                f'[AUTH] FAILED: login form still present in response '
+                f'for Y{study_year}S{sem_digit}. Credentials rejected (no error message shown).'
             )
 
         logger.info('[AUTH] SUCCESS: confirmed logged in to Y%dS%d (batch %d)',
@@ -167,13 +192,31 @@ class PortalAuth:
 
     def _is_login_page(self, response, subsite_base=None):
         """
-        Return True if the response looks like the login page.
-        Checks URL suffix AND body content. Does NOT check HTTP status —
-        callers that care about status code check it separately.
+        Return True if response looks like the login page.
+
+        Checks (in order):
+          1. URL ends with login.jsp
+          2. Failure phrases found in tag-STRIPPED text (not raw HTML)
+          3. Login form field present in raw HTML
         """
         if response.url.lower().endswith('login.jsp'):
             return True
-        body = response.text.lower(); u = self.user_field.lower()
-        if (('name="' + u + '"') in body or ("name='" + u + "'") in body) and '<form' in body:
+
+        # Use get_text() so failure phrases split across tags are found
+        try:
+            page_soup     = BeautifulSoup(response.text, 'lxml')
+            stripped_text = page_soup.get_text(separator=' ').lower()
+        except Exception:
+            stripped_text = response.text.lower()
+
+        for phrase in _FAILURE_PHRASES:
+            if phrase in stripped_text:
+                return True
+
+        # Also check for login form presence in raw HTML
+        raw_body = response.text.lower()
+        u = self.user_field.lower()
+        if (('name="' + u + '"') in raw_body or ("name='" + u + "'") in raw_body) and '<form' in raw_body:
             return True
+
         return False

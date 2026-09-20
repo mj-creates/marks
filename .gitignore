@@ -30,3 +30,6 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Login response body saved for one-time diagnosis
+last_login_response.html
