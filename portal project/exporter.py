@@ -22,6 +22,8 @@ import pandas as pd
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+from scraper import clean_subject_header
+
 logger = logging.getLogger(__name__)
 
 # Styling Constants
@@ -84,10 +86,21 @@ def export_to_excel(
     filepath = os.path.abspath(os.path.join(output_dir, filename))
 
     if not records:
-        df = pd.DataFrame(columns=["S.No", "Regd No", "Student Name", "Section", "Semester", "Status"])
-        df.loc[0] = [1, "-", "No records found", "-", f"Year {study_year} Sem {sem_digit}", "No Data"]
+        df = pd.DataFrame(columns=["Regd No", "Name", "Section", "Status"])
+        df.loc[0] = ["-", "No records found", "-", "No Data"]
     else:
-        df = pd.DataFrame(records)
+        # Clean and normalize all column keys in each record
+        cleaned_records = []
+        for r in records:
+            new_r = {}
+            for k, v in r.items():
+                cleaned_k = clean_subject_header(k)
+                new_r[cleaned_k] = v
+            if "Student Name" in new_r and "Name" not in new_r:
+                new_r["Name"] = new_r["Student Name"]
+            cleaned_records.append(new_r)
+
+        df = pd.DataFrame(cleaned_records)
         
         # 1. Sort by Registration Number ascending
         if "Regd No" in df.columns:
@@ -95,19 +108,19 @@ def export_to_excel(
             df = df.sort_values(by="_sort_regd", ascending=True).reset_index(drop=True)
             df.drop(columns=["_sort_regd"], inplace=True)
             
-        # 2. Sequential S.No
-        df["S.No"] = range(1, len(df) + 1)
-        
-        # 3. Organize Columns
-        id_cols = [c for c in ["S.No", "Regd No", "Student Name", "Section", "Semester", "Overall Sem"] if c in df.columns]
+        # 2. Organize Columns strictly according to requested layout:
+        # Columns: Regd No, Name, Section, followed linearly by clean subjects
+        lead_cols = [c for c in ["Regd No", "Name", "Section"] if c in df.columns]
         
         summary_keywords = ["grand total", "total marks", "result", "sgpa", "cgpa", "percentage", "credits"]
-        summary_cols = [c for c in df.columns if c not in id_cols and any(k == c.lower().strip() for k in summary_keywords)]
+        summary_cols = [c for c in df.columns if c not in lead_cols and any(k == c.lower().strip() for k in summary_keywords)]
         
-        subject_cols = [c for c in df.columns if c not in id_cols and c not in summary_cols]
+        # Omit extraneous metadata columns from master sheet
+        meta_cols = ["s.no", "sl.no", "sno", "semester", "overall sem", "status", "student name"]
+        subject_cols = [c for c in df.columns if c not in lead_cols and c not in summary_cols and c.lower() not in meta_cols]
         subject_cols_sorted = sorted(subject_cols, key=_subject_sort_key)
         
-        final_column_order = id_cols + subject_cols_sorted + summary_cols
+        final_column_order = lead_cols + subject_cols_sorted + summary_cols
         df = df[final_column_order]
 
     # Write to Excel and apply styling via openpyxl
@@ -143,9 +156,9 @@ def export_to_excel(
                 val = cell.value
                 
                 # Alignment rules
-                if col_name in ["S.No", "Regd No", "Section", "Semester", "Overall Sem"]:
+                if col_name in ["Regd No", "Section"]:
                     cell.alignment = _ALIGN_CENTER
-                elif col_name == "Student Name":
+                elif col_name in ["Name", "Student Name"]:
                     cell.alignment = _ALIGN_LEFT
                 else:
                     # Marks columns

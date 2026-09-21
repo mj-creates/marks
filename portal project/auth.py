@@ -154,9 +154,16 @@ class PortalAuth:
         # Check 2: failure phrases in stripped text
         for phrase in _FAILURE_PHRASES:
             if phrase in stripped_text:
+                err_detail = phrase
+                for tag in resp_soup.find_all(['font', 'strong', 'b', 'span', 'p']):
+                    t = tag.get_text(separator=' ').strip()
+                    t_lower = t.lower()
+                    if phrase in t_lower or 'expired' in t_lower or 'deo' in t_lower:
+                        err_detail = ' '.join(t.split())
+                        break
                 raise AuthError(
-                    f'[AUTH] FAILED: portal returned "{phrase}" '
-                    f'for Y{study_year}S{sem_digit}. Check credentials.'
+                    f'Portal returned: "{err_detail}". '
+                    f'If this account is expired on this archive, use your active browser session (JSESSIONID) instead.'
                 )
 
         # Check 3: login form still present in raw HTML

@@ -87,16 +87,48 @@ def main():
 
 
 def render_scraper_tab():
-    st.subheader("1. Portal Selection & Credentials")
+    st.subheader("1. Portal Selection & Authentication")
     
     col1, col2 = st.columns([1, 1], gap="large")
     
     with col1:
-        st.markdown("##### 🔐 Faculty Credentials")
-        default_user = os.getenv("PORTAL_USERNAME", "")
-        username = st.text_input("Portal Username / Faculty Login ID", value=default_user, placeholder="e.g. 02507")
-        password = st.text_input("Portal Password", type="password", placeholder="Enter your portal password")
-        st.caption("🔒 Credentials are used in-memory for this scraping session only and are never saved.")
+        st.markdown("##### 🔐 Authentication Method")
+        auth_mode = st.radio(
+            "Select how you want to connect to VIMS:",
+            [
+                "🌟 Active Browser Session (JSESSIONID) [Recommended]",
+                "🔑 Faculty Login (Username & Password)"
+            ],
+            index=0,
+            help="Since historical portal archives expire faculty logins, using your active Chrome JSESSIONID connects immediately."
+        )
+        
+        jsessionid_val = ""
+        username = ""
+        password = ""
+        
+        if "JSESSIONID" in auth_mode:
+            jsessionid_val = st.text_input(
+                "Browser Session Cookie (JSESSIONID)",
+                placeholder="e.g. 5A92C1D4F8... (copy from Chrome)",
+                help="Copy the JSESSIONID cookie from Chrome where you are already logged into the portal."
+            ).strip()
+            
+            with st.expander("💡 How to get your JSESSIONID from Chrome (takes 10 seconds)", expanded=not bool(jsessionid_val)):
+                st.markdown(
+                    """
+                    1. In Google Chrome, go to your open VIMS tab (`examhome.jsp` or `RSMSubAll.jsp`).
+                    2. Press **F12** on your keyboard (or right-click anywhere and click **Inspect**).
+                    3. Click on the **Application** tab at the top (if hidden, click the `>>` icon).
+                    4. In the left panel under **Storage**, expand **Cookies** and click `https://vims.vignan.ac.in`.
+                    5. Double-click the Value next to **`JSESSIONID`**, press **Ctrl + C** to copy, and paste it here!
+                    """
+                )
+        else:
+            default_user = os.getenv("PORTAL_USERNAME", "")
+            username = st.text_input("Portal Username / Faculty Login ID", value=default_user, placeholder="e.g. 02507")
+            password = st.text_input("Portal Password", type="password", placeholder="Enter your portal password")
+            st.caption("🔒 Credentials are used in-memory for this scraping session only and are never saved.")
 
     with col2:
         st.markdown("##### 🎯 Target Semester")
@@ -129,27 +161,48 @@ def render_scraper_tab():
 
         overall_sem = overall_semester_number(study_year, sem_digit)
         st.info(f"Target Subsite: **a{code}** (`https://vims.vignan.ac.in/a{code}/`) · **Year {study_year} Sem {sem_digit}** (Overall Sem {overall_sem}) · Course: **B.Tech (A)** · Branch: **CSE (04)**")
+        
+        with st.expander("⚙️ Section Settings (Optional)", expanded=False):
+            manual_sec_input = st.text_input(
+                "Specific Sections (comma separated)",
+                placeholder="Leave blank to auto-detect all sections (or enter e.g. 11, 12, 13, 14, 15)",
+                help="If you want to scrape specific sections or if the portal form is dynamic, enter them here."
+            )
+            manual_secs = [s.strip() for s in manual_sec_input.split(",") if s.strip()] if manual_sec_input else None
 
     st.markdown("<br>", unsafe_allow_html=True)
     start_btn = st.button("🚀 Start Scraper & Generate Master Excel", type="primary", use_container_width=True)
 
     if start_btn:
-        if not username or not password:
-            st.error("Please enter your faculty username and password above.")
-            return
-
-        progress_bar = st.progress(0, text="Initializing session...")
-        status_box = st.empty()
+        custom_session = None
+        auth = None
         
-        try:
-            status_box.info(f"Connecting to `https://vims.vignan.ac.in/a{code}/login.jsp`...")
+        if "JSESSIONID" in auth_mode:
+            if not jsessionid_val:
+                st.error("⚠️ Please paste your active `JSESSIONID` from Chrome into the field above.")
+                return
+            import requests
+            custom_session = requests.Session()
+            custom_session.verify = False
+            custom_session.cookies.set("JSESSIONID", jsessionid_val, domain="vims.vignan.ac.in", path=f"/a{code}/")
+            custom_session.cookies.set("JSESSIONID", jsessionid_val, domain="vims.vignan.ac.in", path="/")
+        else:
+            if not username or not password:
+                st.error("⚠️ Please enter your faculty username and password above.")
+                return
             auth = PortalAuth(
                 base_host="vims.vignan.ac.in",
                 username=username,
                 password=password,
                 verify_ssl=False
             )
-            scraper = SemesterScraper(auth)
+
+        progress_bar = st.progress(0, text="Initializing session...")
+        status_box = st.empty()
+        
+        try:
+            status_box.info(f"Connecting to `https://vims.vignan.ac.in/a{code}/`...")
+            scraper = SemesterScraper(auth=auth, base_host="vims.vignan.ac.in")
             
             def on_progress(idx, total, sec_label):
                 pct = idx / total
@@ -160,14 +213,20 @@ def render_scraper_tab():
                 admission_year=batch_year,
                 study_year=study_year,
                 sem_digit=sem_digit,
-                progress_callback=on_progress
+                progress_callback=on_progress,
+                custom_session=custom_session,
+                manual_sections=manual_secs,
             )
             
             progress_bar.progress(1.0, text="Scraping completed!")
             
             if not all_records:
                 status_box.empty()
-                st.warning("⚠️ No student records were returned. Please verify that marks have been uploaded on the portal for this semester.")
+                st.warning(
+                    "⚠️ No student records were returned. "
+                    "Please verify that marks have been uploaded on the portal for this semester, "
+                    "or enter section numbers (e.g. 11, 12, 13) in 'Section Settings' above."
+                )
                 return
 
             status_box.info("Aligning subject columns and generating Master Excel report...")
@@ -185,7 +244,7 @@ def render_scraper_tab():
                 
             st.session_state["report_bytes"] = file_bytes
             st.session_state["report_filename"] = Path(excel_path).name
-            st.session_state["preview_df"] = pd.DataFrame(all_records)
+            st.session_state["preview_df"] = pd.read_excel(excel_path)
             
             status_box.empty()
             st.success(f"🎉 Successfully scraped **{len(all_records)} student rows** across all sections into a single Master Excel!")
@@ -193,7 +252,9 @@ def render_scraper_tab():
         except AuthError as exc:
             progress_bar.empty()
             status_box.empty()
-            st.error(f"❌ Portal Authentication Error: {exc}")
+            st.error(f"❌ Portal Authentication / Session Error:\n\n{exc}")
+            if "JSESSIONID" not in auth_mode:
+                st.info("💡 **Tip**: Since older archive faculty logins are expired by the DEO, switch to **'🌟 Active Browser Session (JSESSIONID)'** above, paste your cookie from Chrome, and click Scrape to proceed without login issues!")
         except Exception as exc:
             progress_bar.empty()
             status_box.empty()
@@ -292,7 +353,7 @@ def render_uploader_tab():
                 with open(excel_path, "rb") as fh:
                     st.session_state["upload_report_bytes"] = fh.read()
                 st.session_state["upload_report_filename"] = Path(excel_path).name
-                st.session_state["upload_preview_df"] = pd.DataFrame(all_records)
+                st.session_state["upload_preview_df"] = pd.read_excel(excel_path)
                 st.success(f"🎉 Successfully merged **{len(all_records)} student rows** from {len(uploaded_files)} files!")
             else:
                 st.error("No student records could be extracted from the uploaded files.")
