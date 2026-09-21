@@ -33,3 +33,5 @@ Thumbs.db
 
 # Login response body saved for one-time diagnosis
 last_login_response.html
+
+test_*.html
