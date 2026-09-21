@@ -29,7 +29,7 @@ class PortalAuth:
         if verify_ssl is not None:
             self.verify_ssl = verify_ssl
         else:
-            self.verify_ssl = os.getenv('PORTAL_VERIFY_SSL', 'false').strip().lower() == 'true'
+            self.verify_ssl = os.getenv('PORTAL_VERIFY_SSL', 'true').strip().lower() == 'true'
         if not self.verify_ssl:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
