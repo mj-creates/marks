@@ -21,7 +21,7 @@ class AuthError(Exception):
 class PortalAuth:
     def __init__(self, base_host=None, username=None, password=None,
                  login_path=None, user_field=None, pass_field=None, verify_ssl=None):
-        self.base_host  = base_host  or os.getenv('PORTAL_BASE_HOST', '192.168.10.10')
+        self.base_host  = base_host  or os.getenv('PORTAL_BASE_HOST', 'vims.vignan.ac.in')
         self.username   = username   or ''
         self.password   = password   or ''
         self.user_field = user_field or os.getenv('PORTAL_LOGIN_USER_FIELD', 'user')

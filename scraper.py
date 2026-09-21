@@ -254,7 +254,7 @@ class SemesterScraper:
         table = None
         for t in soup.find_all("table"):
             text = t.get_text(separator=" ").lower()
-            if "regd" in text or "roll" in text or "201fa" in text or "211fa" in text:
+            if "regd" in text or "roll" in text or "fa04" in text or "fa0" in text or any(f"{y}fa" in text for y in ["201","211","221","231","241"]):
                 table = t
                 break
 
@@ -291,8 +291,16 @@ class SemesterScraper:
         overall   = overall_semester_number(study_year, sem_digit)
         sem_label = f"Year {study_year} Sem {sem_digit}"
 
+        # Find the index of the header row safely using enumerate
+        header_tr = header_row[0].parent
+        header_idx = 0
+        for i, r in enumerate(rows):
+            if r is header_tr:
+                header_idx = i
+                break
+
         records = []
-        for row in rows[rows.index(header_row[0].parent) + 1:]:
+        for row in rows[header_idx + 1:]:
             cells = row.find_all(["td", "th"])
             if not cells or len(cells) < 2:
                 continue
