@@ -40,11 +40,17 @@ def clean_subject_header(raw_header: str) -> str:
     """
     text = raw_header.strip()
     
+    # Strip any section prefixes like 'VFSTRB.TECH- -11-Section '
+    prefix_regex = re.compile(r'^VFSTR\s*B\.?\s*TECH.*?\d+[-_ ]Section\s*[-_ ]*', re.I)
+    cleaned_prefix = prefix_regex.sub('', text).strip()
+    if cleaned_prefix:
+        text = cleaned_prefix
+
     # Check for known ID columns first
     t_lower = text.lower()
     if any(k in t_lower for k in ["regd", "roll", "htno", "h.t.no"]) and not any(k in t_lower for k in ["int", "ext", "tot", "mid", "grade"]):
         return "Regd No"
-    if any(k in t_lower for k in ["student name", "candidate name", "name of the student"]) or t_lower == "name":
+    if any(k in t_lower for k in ["student name", "candidate name", "name of the student"]) or t_lower == "name" or t_lower.endswith("name"):
         return "Name"
     if t_lower in ["section", "sec"] or (t_lower.startswith("section") and not any(k in t_lower for k in ["marks", "subject", "int", "ext", "tot"])):
         return "Section"
