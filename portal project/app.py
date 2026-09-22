@@ -294,11 +294,19 @@ def render_scraper_tab():
 
         if st.session_state["preview_df"] is not None:
             st.markdown("##### 🔍 Master Dataset Preview (Student Names Directly Beside REGD.NO)")
-            preview = st.session_state["preview_df"]
+            preview = st.session_state["preview_df"].copy()
             if "REGD.NO" in preview.columns:
                 preview = preview.sort_values(by="REGD.NO").reset_index(drop=True)
             elif "Regd No" in preview.columns:
                 preview = preview.sort_values(by="Regd No").reset_index(drop=True)
+            
+            # Ensure PyArrow serialization safety across all columns
+            for c in preview.columns:
+                if c not in ["REGD.NO", "NAME", "SECTION", "Regd No", "Name", "Section"]:
+                    preview[c] = pd.to_numeric(preview[c], errors="coerce")
+                else:
+                    preview[c] = preview[c].astype(str)
+
             st.dataframe(preview.head(50), use_container_width=True)
 
 
@@ -386,9 +394,16 @@ def render_uploader_tab():
             use_container_width=True,
         )
         if st.session_state["upload_preview_df"] is not None:
-            preview = st.session_state["upload_preview_df"]
-            if "Regd No" in preview.columns:
+            preview = st.session_state["upload_preview_df"].copy()
+            if "REGD.NO" in preview.columns:
+                preview = preview.sort_values(by="REGD.NO").reset_index(drop=True)
+            elif "Regd No" in preview.columns:
                 preview = preview.sort_values(by="Regd No").reset_index(drop=True)
+            for c in preview.columns:
+                if c not in ["REGD.NO", "NAME", "SECTION", "Regd No", "Name", "Section"]:
+                    preview[c] = pd.to_numeric(preview[c], errors="coerce")
+                else:
+                    preview[c] = preview[c].astype(str)
             st.dataframe(preview.head(50), use_container_width=True)
 
 
