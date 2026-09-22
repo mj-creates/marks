@@ -40,10 +40,25 @@ st.set_page_config(
 )
 
 # ── Session State Initialization ──────────────────────────────────────────
+_CONSOLIDATED_MASTER_PATH = os.path.abspath(r"c:\Users\spjee\marks\portal project\output\Consolidated_Master_Marks.xlsx")
+
+init_bytes = None
+init_filename = None
+init_df = None
+
+if os.path.exists(_CONSOLIDATED_MASTER_PATH):
+    try:
+        with open(_CONSOLIDATED_MASTER_PATH, "rb") as fh:
+            init_bytes = fh.read()
+        init_filename = "Consolidated_Master_Marks.xlsx"
+        init_df = pd.read_excel(_CONSOLIDATED_MASTER_PATH, sheet_name="Master (Single Header)")
+    except Exception as e:
+        logger.warning("Could not pre-load master file: %s", e)
+
 for key, default in [
-    ("report_bytes", None),
-    ("report_filename", None),
-    ("preview_df", None),
+    ("report_bytes", init_bytes),
+    ("report_filename", init_filename),
+    ("preview_df", init_df),
     ("upload_report_bytes", None),
     ("upload_report_filename", None),
     ("upload_preview_df", None),
@@ -278,9 +293,11 @@ def render_scraper_tab():
             )
 
         if st.session_state["preview_df"] is not None:
-            st.markdown("##### 🔍 Master Dataset Preview (Sorted by Regd No)")
+            st.markdown("##### 🔍 Master Dataset Preview (Student Names Directly Beside REGD.NO)")
             preview = st.session_state["preview_df"]
-            if "Regd No" in preview.columns:
+            if "REGD.NO" in preview.columns:
+                preview = preview.sort_values(by="REGD.NO").reset_index(drop=True)
+            elif "Regd No" in preview.columns:
                 preview = preview.sort_values(by="Regd No").reset_index(drop=True)
             st.dataframe(preview.head(50), use_container_width=True)
 
